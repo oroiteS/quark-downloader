@@ -5,7 +5,8 @@
 //	每片：gate.Acquire → W≥片大小跳过 → 片级重试循环（1 首试 + ≤4 重试, BackoffSeg 退避,
 //	从 S+W 断点续, §3.10）→ 独立开流 Seek(S+W) → io.CopyBuffer 流写 → 写完即关
 //	收尾（§3.10）：finalizeCleanup 按错误分类表处置半成品（删/留/转单线程/4xx 兜底）
-//	监视线程：200ms 采样速度 + 每 1s 全量 SaveQMeta
+//	限流制动（§3.8）：429/503 → gate.Shrink（max(4,×0.7)，非阻塞收差额票）
+//	监视线程：200ms 采样速度 + 每 1s 全量 SaveQMeta + gate.TickRecover
 package engine
 
 import (
@@ -271,6 +272,14 @@ func (t *Task) fetchSeg(ctx context.Context, idx int, buf []byte, rng *rand.Rand
 		err := t.fetchOnce(sctx, idx, buf)
 		if err == nil {
 			return nil
+		}
+		// ⓪ 限流制动（§3.8 逐字，Task 9 接线）：收到 429/503 →
+		// gate.Shrink()（gateLimit=max(4,×0.7)，非阻塞收差额票）。
+		// 放在抢占/取消判定之前——限流是全局急务；429/503 错误链不含
+		// 抢占/取消哨兵（statusOf=0），互不误触。Shrink 内部绝不阻塞，
+		// 不会拖住本 worker。
+		if isRateLimited(statusOf(err)) {
+			t.gate.Shrink()
 		}
 		// ① 先判抢占（Task 10 顺序判定框架）：片级令牌已取消而全局
 		//    未取消 → 抢占，交 workerA 重入队（不计失败、不退避）。
@@ -569,6 +578,7 @@ func (t *Task) monitorA(ctx context.Context, wg *sync.WaitGroup) {
 		case <-ctx.Done():
 			return
 		case now := <-tk.C:
+			t.gate.TickRecover(now) // §3.8 恢复：距上次限流 ≥30s 且 limit<N → +1（节奏判定在 Gate 内，200ms 一跳只是喂表）
 			t.speed.Sample(t.done.Load(), now)
 			if t.onEvent != nil {
 				t.onEvent(t.progress())

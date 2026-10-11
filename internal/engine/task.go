@@ -44,17 +44,24 @@ func (s taskState) String() string {
 //
 // Ruling E1：本接口是 worker 与闸门之间的唯一契约——Task 7 的 runA 持有
 // 未导出 gate 字段（默认 noOpGate 直通占位），Task 9 提供真实现（计数值
-// 动态收敛），Task 14 装配。ctx 取消时 Acquire 必须返回错误让 worker 退出。
+// 动态收敛）并扩展 Shrink/TickRecover 两个 §3.8 接线点，Task 14 装配。
+// ctx 取消时 Acquire 必须返回错误让 worker 退出；Acquire 返回错误 ⇒
+// 调用方不持票、不得 Release。
 type gate interface {
 	Acquire(ctx context.Context) error
 	Release()
+	Shrink()                   // §3.8：收到 429/503 时收缩（fetchSeg 错误分派处调用）
+	TickRecover(now time.Time) // §3.8：监视线程周期调的恢复检查（now 注入便于测试）
 }
 
-// noOpGate 是闸门的直通占位：不限制并发，但尊重 ctx 生命周期。
+// noOpGate 是闸门的直通占位：不限制并发，但尊重 ctx 生命周期；§3.8
+// 接线点为空操作。
 type noOpGate struct{}
 
 func (noOpGate) Acquire(ctx context.Context) error { return ctx.Err() }
 func (noOpGate) Release()                          {}
+func (noOpGate) Shrink()                           {}
+func (noOpGate) TickRecover(time.Time)             {}
 
 // Progress 是一次进度快照（进度事件 §3.9 的载荷形态）。
 type Progress struct {
