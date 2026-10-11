@@ -6,6 +6,8 @@
 //	从 S+W 断点续, §3.10）→ 独立开流 Seek(S+W) → io.CopyBuffer 流写 → 写完即关
 //	收尾（§3.10）：finalizeCleanup 按错误分类表处置半成品（删/留/转单线程/4xx 兜底）
 //	限流制动（§3.8）：429/503 → gate.Shrink（max(4,×0.7)，非阻塞收差额票）
+//	慢连接抢占（§3.7）：监视线程每 5s 两遍扫描，掐慢连接的片级令牌 →
+//	  errPreempted → 片重新入队（W 保留、不计失败不退避）
 //	监视线程：200ms 采样速度 + 每 1s 全量 SaveQMeta + gate.TickRecover
 package engine
 
@@ -206,7 +208,15 @@ func (t *Task) workerA(ctx context.Context, w, n int, queue *segQueue) {
 		if !ok {
 			return
 		}
+		// 采样登记（§3.7 供抢占看门狗）：领片即记录年龄锚点；片处理完
+		//（成功/失败/被抢皆然）释放。nil 防御：直接构造 Task 的路径。
+		if t.preempt != nil {
+			t.preempt.begin(w, idx, time.Now())
+		}
 		err := t.fetchSeg(ctx, idx, buf, rng)
+		if t.preempt != nil {
+			t.preempt.end(w)
+		}
 		switch {
 		case err == nil:
 			queue.release()
@@ -566,13 +576,15 @@ func (c *segWriter) Write(p []byte) (int, error) {
 }
 
 // monitorA 是监视线程：sampleEvery 节拍喂 EWMA 速度计（§3.12）+ 发进度
-// 事件；每 qmetaEvery 全量 SaveQMeta（§3.6「每 1s 全量重写」）。ctx 结束
-// 即退（终态落盘由 runA 收尾统一做）。
+// 事件；每 qmetaEvery 全量 SaveQMeta（§3.6「每 1s 全量重写」）；每
+// preemptEvery 执行一轮慢连接抢占扫描（§3.7 两遍扫描，周期注入化）。
+// ctx 结束即退（终态落盘由 runA 收尾统一做）。
 func (t *Task) monitorA(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	tk := time.NewTicker(t.sampleEvery)
 	defer tk.Stop()
 	nextSave := time.Now().Add(t.qmetaEvery)
+	nextScan := time.Now().Add(t.preemptEvery)
 	for {
 		select {
 		case <-ctx.Done():
@@ -586,6 +598,10 @@ func (t *Task) monitorA(ctx context.Context, wg *sync.WaitGroup) {
 			if !now.Before(nextSave) {
 				_ = t.saveMeta()
 				nextSave = now.Add(t.qmetaEvery)
+			}
+			if t.preempt != nil && !now.Before(nextScan) {
+				t.preempt.Scan(now) // §3.7 抢占扫描（200ms 节拍内按 5s 分频）
+				nextScan = now.Add(t.preemptEvery)
 			}
 		}
 	}

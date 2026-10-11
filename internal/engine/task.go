@@ -89,14 +89,18 @@ type Task struct {
 	speed  *Speedometer
 
 	// ---- 可注入常数（测试压成毫秒/微秒级；生产默认在 newTask）----
-	ramp        time.Duration // 冷启动错峰总时长：sleep(ramp×w/N)（§3.5）
-	sampleEvery time.Duration // 监视线程速度采样节拍（§3.12：200ms）
-	qmetaEvery  time.Duration // 监视线程 SaveQMeta 周期（§3.6：1s）
+	ramp         time.Duration // 冷启动错峰总时长：sleep(ramp×w/N)（§3.5）
+	sampleEvery  time.Duration // 监视线程速度采样节拍（§3.12：200ms）
+	qmetaEvery   time.Duration // 监视线程 SaveQMeta 周期（§3.6：1s）
+	preemptEvery time.Duration // 抢占扫描周期（§3.7：5s；监视线程内分频）
 
 	// ---- Task 8（§3.10）----
 	segMu     sync.Mutex                                 // segCancel 的锁
 	segCancel map[int]context.CancelFunc                 // 片级取消令牌注册表（§3.5）：Task 10 抢占看门狗 cancelSeg(idx) 只掐本片
 	sleep     func(context.Context, time.Duration) error // 片级重试退避等待（生产 sleepCtx；测试注入桩）
+
+	// ---- Task 10（§3.7 慢连接抢占）----
+	preempt *Preemptor // 两遍扫描看门狗（worker begin/end 登记、monitorA 周期 Scan；nil 防御：直接构造 Task 的路径）
 
 	// ---- 钩子（nil 安全；Task 14 / 测试装配）----
 	onEvent       func(Progress) // 进度事件回调（监视线程节拍驱动）
@@ -117,23 +121,26 @@ type Task struct {
 func newTask(id, dest, url, cookieStr string, threads int, total int64) *Task {
 	segs := Plan(total, threads)
 	n := max(min(threads, len(segs), effMax), 1)
-	return &Task{
-		ID:          id,
-		Dest:        dest,
-		URL:         url,
-		CookieStr:   cookieStr,
-		Threads:     threads,
-		Total:       total,
-		Segs:        segs,
-		W:           make([]int64, len(segs)),
-		client:      NewEngineClient(n),
-		gate:        noOpGate{},
-		speed:       NewSpeedometer(),
-		ramp:        Ramp(n),                // N>256 ? 6s : 3s（§3.3）
-		sampleEvery: 200 * time.Millisecond, // §3.12
-		qmetaEvery:  time.Second,            // §3.6
-		sleep:       sleepCtx,               // §3.10 片级重试退避等待
+	tk := &Task{
+		ID:           id,
+		Dest:         dest,
+		URL:          url,
+		CookieStr:    cookieStr,
+		Threads:      threads,
+		Total:        total,
+		Segs:         segs,
+		W:            make([]int64, len(segs)),
+		client:       NewEngineClient(n),
+		gate:         noOpGate{},
+		speed:        NewSpeedometer(),
+		ramp:         Ramp(n),                // N>256 ? 6s : 3s（§3.3）
+		sampleEvery:  200 * time.Millisecond, // §3.12
+		qmetaEvery:   time.Second,            // §3.6
+		preemptEvery: preemptScanEvery,       // §3.7：5s
+		sleep:        sleepCtx,               // §3.10 片级重试退避等待
 	}
+	tk.preempt = newPreemptor(tk, n, len(segs)) // §3.7 采样表按 worker 编号（n 与 runA 同式）
+	return tk
 }
 
 // progress 返回当前进度快照。Done 与 State 原子读，SpeedBPS 内部有锁，

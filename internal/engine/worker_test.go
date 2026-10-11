@@ -84,13 +84,16 @@ func newRangeServer(t *testing.T, data []byte) (*httptest.Server, *rangeRecorder
 // 供「服务器忽略 Range」语义测试（§3.5：分片写会错位 → 记错误）。
 
 // newFastTask 造一个注入微秒~毫秒级常数的任务（生产 ramp=3s/6s、
-// qmetaEvery=1s、sampleEvery=200ms，进测试必须压缩）。
+// qmetaEvery=1s、sampleEvery=200ms，进测试必须压缩）。preemptEvery 反向
+// 压成 1h：真实退避时长的存量测试（TestRunASegRetryExhausted 等）不该被
+// 抢占扫描干扰——抢占专项测试（preempt_test.go）自行覆写。
 func newFastTask(t *testing.T, dest, url string, threads int, total int64) *Task {
 	t.Helper()
 	tk := newTask("test", dest, url, "", threads, total)
 	tk.ramp = 2 * time.Millisecond
 	tk.sampleEvery = time.Millisecond
 	tk.qmetaEvery = 5 * time.Millisecond
+	tk.preemptEvery = time.Hour
 	return tk
 }
 
