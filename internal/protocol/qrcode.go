@@ -7,7 +7,7 @@ import qrcode "github.com/skip2/go-qrcode"
 
 // QRPNG 把 text 编码为纠错 M 等级的二维码,返回 pixelSize×pixelSize 的
 // PNG bytes,登录页 <img> 可直接使用(配 Content-Type: image/png)。
-// 空文本沿用库默认行为:不报错,生成编码 0 字节内容的最小 v1 码。
+// 空文本由库报错("no data to encode")并原样透传,不生成二维码。
 func QRPNG(text string, pixelSize int) ([]byte, error) {
 	return qrcode.Encode(text, qrcode.Medium, pixelSize)
 }
