@@ -35,8 +35,7 @@ type Segment struct {
 //	want  = clamp(max(bySize, eff×32), 1, MAX_SEG)
 //	seg   = clamp(⌈total/want⌉, MIN_SEG, maxSeg)
 //	n     = clamp(⌈total/seg⌉, 1, MAX_SEG)
-//	finalSeg = ⌈total/n⌉            // 重新对齐，避免最后一片畸形
-//	第 i 片 = [i×finalSeg, min((i+1)×finalSeg, total)−1]
+//	之后交给 layout(total, n) 重对齐并切片
 //
 // total ≤ 0 返回 nil。纯函数，无副作用。
 func Plan(total int64, threads int) []Segment {
@@ -47,7 +46,18 @@ func Plan(total int64, threads int) []Segment {
 	want := clamp(max(baseCount(total), eff*wantPerEff), 1, segCountMax)
 	seg := clamp(ceilDiv(total, want), segBytesMin, segCap(total))
 	n := clamp(ceilDiv(total, seg), 1, segCountMax)
-	finalSeg := ceilDiv(total, n)
+	return layout(total, int(n))
+}
+
+// layout 由 total 与片数 n 重推分片布局（§3.3 后半段，单一事实来源）：
+//
+//	finalSeg = ⌈total/n⌉            // 重新对齐，避免最后一片畸形
+//	第 i 片 = [i×finalSeg, min((i+1)×finalSeg, total)−1]
+//
+// 片的 S/E 只由 (total, n) 决定（threads 只影响 n 的选取），因此
+// .qmeta（§3.6）只持久化 total 与 W，落盘补写、读回校验都用本函数重推。
+func layout(total int64, n int) []Segment {
+	finalSeg := ceilDiv(total, int64(n))
 
 	segs := make([]Segment, n)
 	for i := range segs {
