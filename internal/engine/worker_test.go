@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
@@ -336,6 +337,105 @@ func TestRunAColdStart(t *testing.T) {
 		t.Errorf("末 worker 起步 %v, want ≥ %v（线性分布不存在）", maxDur, tail)
 	}
 }
+
+// F1（审查）：Threads<1 是装配错误——runA 曾直接 min(Threads, 片数, 512)
+// 得 N=0：零 worker、W 全零、firstErr=nil → 终态 done、返回 nil，全零文件
+// 被当成功。修复语义：显式返回配置错误（静默钳 1 同样不可取——会掩盖
+// 调用方 bug），且在任何副作用（状态迁移/预分配/发请求）之前拒绝。
+func TestRunAThreadsInvalid(t *testing.T) {
+	total := int64(8 << 20) // Plan(total, 0) 仍产出 16 片（want=max(bySize,0)），守卫可达
+	data := testPattern(total)
+	srv, rec, _ := newRangeServer(t, data, nil, 0)
+	dest := filepath.Join(t.TempDir(), "file.bin")
+
+	for _, threads := range []int{0, -3} {
+		t.Run(strconv.Itoa(threads), func(t *testing.T) {
+			tk := newFastTask(t, dest, srv.URL, threads, total)
+			err := tk.runA(context.Background())
+			if err == nil {
+				t.Fatalf("Threads=%d 应返回配置错误, got nil（零 worker 静默成功即 F1）", threads)
+			}
+			if p := tk.progress(); p.State == "done" {
+				t.Errorf("Threads=%d 终态 = done, want 非 done（零 worker 不得报成功）", threads)
+			}
+			if _, statErr := os.Stat(dest); statErr == nil {
+				t.Errorf("配置错误应在预分配前拒绝, 目标文件不应被创建")
+			}
+		})
+	}
+	if n := len(rec.snapshot()); n != 0 {
+		t.Errorf("非法并发档位不应发出任何请求, got %d", n)
+	}
+}
+
+// F2（审查）：取消与错误的分类竞态——用户 cancel 与服务器干净断连同瞬，
+// body 读以 io.EOF 干净收场（CopyBuffer err=nil 但 written<remain），被径直
+// 判 errShortBody → 终态 error 而非 canceled。真实网络下该窗口仅纳秒级，
+// 故注入 RoundTripper：在「返回 io.EOF 的那次 Read」里精确同步 cancel，
+// 确定性构造竞态。修复语义：短体判定前先查 ctx——已取消即按取消归类。
+func TestRunACancelVsShortBodyRace(t *testing.T) {
+	total := int64(1 << 20) // 2 片 × 512KB；threads=1 → 单 worker 顺序先取片 0
+	dest := filepath.Join(t.TempDir(), "file.bin")
+	tk := newFastTask(t, dest, "http://race.invalid/x", 1, total)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	tk.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var a, b int64
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &a, &b); err != nil {
+			t.Errorf("畸形 Range 头 %q: %v", r.Header.Get("Range"), err)
+			return nil, err
+		}
+		half := (b - a + 1) / 2
+		return &http.Response{
+			StatusCode: http.StatusPartialContent,
+			Header:     http.Header{"Content-Range": {fmt.Sprintf("bytes %d-%d/%d", a, b, total)}},
+			// 只交前半区间，随后在返回 io.EOF 的同一次 Read 里 cancel：
+			// 「干净 EOF + 用户取消」同时成立，恰好压在分类点上。
+			Body: &cancelEOFBody{data: make([]byte, half), cancel: cancel},
+		}, nil
+	})}
+
+	err := tk.runA(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("取消优先分类: runA 应返回 context.Canceled, got %v", err)
+	}
+	if p := tk.progress(); p.State != "canceled" {
+		t.Errorf("终态 = %q, want canceled（取消竞态不得归为 error）", p.State)
+	}
+	tk.errMu.Lock()
+	first := tk.firstErr
+	tk.errMu.Unlock()
+	if first != nil {
+		t.Errorf("取消竞态不得记 firstErr（应按取消归类）, got %v", first)
+	}
+}
+
+// roundTripFunc 让测试注入 http.RoundTripper（绕过真实网络，精确控制
+// 响应体时序）。
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// cancelEOFBody 模拟「服务器干净断连与用户取消同瞬」：交完 data 后的下
+// 一次 Read 先 cancel 再返回 io.EOF——io.CopyBuffer 因此以
+// (written<remain, err=nil) 收场，确定性落在 errShortBody 分类点上。
+type cancelEOFBody struct {
+	data   []byte
+	off    int
+	cancel context.CancelFunc
+}
+
+func (b *cancelEOFBody) Read(p []byte) (int, error) {
+	if b.off < len(b.data) {
+		n := copy(p, b.data[b.off:])
+		b.off += n
+		return n, nil
+	}
+	b.cancel()
+	return 0, io.EOF
+}
+
+func (b *cancelEOFBody) Close() error { return nil }
 
 // 服务器忽略 Range（分片请求回 200）：分片写会从片偏移写坏整个文件——
 // 本任务记 errRangeIgnored 错误语义（Task 8 转单线程整下 fallback），

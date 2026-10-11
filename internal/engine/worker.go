@@ -36,6 +36,12 @@ func (t *Task) runA(ctx context.Context) error {
 	if len(t.Segs) == 0 {
 		return errors.New("feiwu: 任务无分片（total 非法或 plan 为空）")
 	}
+	// Threads<1 是装配错误（审查 F1）：显式拒绝而非静默钳到 1——静默降级
+	// 会掩盖调用方 bug（错档位下「正常」下完文件无人察觉），静默跑 0 个
+	// worker 更是全零文件报成功。在任何副作用（状态迁移/预分配）之前拦。
+	if t.Threads < 1 {
+		return fmt.Errorf("feiwu: 并发档位非法 Threads=%d（应 ≥ 1）", t.Threads)
+	}
 	t.state.Store(int32(stateRunning))
 	parent := ctx // 外部任务生命周期；终态判定盯它（派生 ctx 还被自己收尾掐）
 	ctx, cancel := context.WithCancel(parent)
@@ -60,7 +66,10 @@ func (t *Task) runA(ctx context.Context) error {
 	}
 	close(queue)
 
-	n := min(t.Threads, len(t.Segs), effMax) // N = min(用户档位, 片数, 512)
+	// N = min(用户档位, 片数, 512)（§3.5）。与 newTask 同式 max(...,1) 下钳
+	// （审查 F1）：两处算法统一成结构不变量——即使入口守卫日后被重构掉，
+	// N 也不可为 0。
+	n := max(min(t.Threads, len(t.Segs), effMax), 1)
 	var workerWG, monWG sync.WaitGroup
 	for w := range n {
 		workerWG.Add(1)
@@ -199,6 +208,13 @@ func (t *Task) fetchSeg(ctx context.Context, idx int, buf []byte) error {
 		return fmt.Errorf("片 %d 写入失败: %w", idx, err)
 	}
 	if written < remain { // LimitReader 防越界：多余字节绝不越过片尾
+		// 取消优先分类（审查 F2）：用户 cancel 与服务器干净断连同瞬时，
+		// body 读以 io.EOF 干净收场（err=nil），径直判 errShortBody 会把
+		// 取消归为终态 error。先查 ctx：已取消即返回 ctx.Err()（fail 按
+		// 取消不记 firstErr，runA 末尾归 canceled）。
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return fmt.Errorf("片 %d: %w（要 %d 得 %d）", idx, errShortBody, remain, written)
 	}
 	return nil
