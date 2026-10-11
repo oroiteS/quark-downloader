@@ -82,6 +82,10 @@ type Session struct {
 	wall *http.Client
 	// base 是换 Cookie 流程的域 base,见 sessionBase;测试可整体覆盖。
 	base sessionBase
+	// keepalivePeriod 是保活心跳周期(§2.6),默认 5min;测试注入短周期。
+	keepalivePeriod time.Duration
+	// quickCheckTimeout 是快速校验的单次请求超时(§2.6),默认 10s;测试注入短超时。
+	quickCheckTimeout time.Duration
 }
 
 // NewSession 创建会话。httpClient 为 nil 时使用禁用系统代理的默认客户端
@@ -96,12 +100,14 @@ func NewSession(httpClient *http.Client, jar *CookieJar) *Session {
 		jar = NewCookieJar()
 	}
 	return &Session{
-		client:   httpClient,
-		jar:      jar,
-		throttle: NewThrottler(),
-		sleep:    sleepContext,
-		wall:     NewWallClient(),
-		base:     defaultSessionBase(),
+		client:            httpClient,
+		jar:               jar,
+		throttle:          NewThrottler(),
+		sleep:             sleepContext,
+		wall:              NewWallClient(),
+		base:              defaultSessionBase(),
+		keepalivePeriod:   5 * time.Minute,
+		quickCheckTimeout: 10 * time.Second,
 	}
 }
 
