@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -80,8 +81,9 @@ func TestShareToken(t *testing.T) {
 }
 
 // TestShareListPaging 验证 §2.8 ②:第 1 页 50 条+_total=60、第 2 页
-// 10 条 → 共 60 条且恰好请求 2 页;query 关键参数逐项核对;
-// fid/file_name/size/dir/share_fid_token 五字段映射到 FileEntry。
+// 10 条 → 共 60 条且恰好请求 2 页;整条 RawQuery 与 §2.8 ② 模板逐字
+// 比对(全部固定参数与顺序逐字锁定);fid/file_name/size/dir/share_fid_token
+// 五字段映射到 FileEntry。
 func TestShareListPaging(t *testing.T) {
 	var n atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -91,23 +93,20 @@ func TestShareListPaging(t *testing.T) {
 		}
 		n.Add(1)
 		q := r.URL.Query()
-		if q.Get("pr") != "ucpro" || q.Get("fr") != "pc" {
-			t.Errorf("query = %q, 应含 pr=ucpro&fr=pc", r.URL.RawQuery)
-		}
-		if q.Get("pwd_id") != "shpwd1" || q.Get("stoken") != "st-xyz" {
-			t.Errorf("pwd_id/stoken = %q/%q, want shpwd1/st-xyz", q.Get("pwd_id"), q.Get("stoken"))
-		}
-		if q.Get("pdir_fid") != "0" {
-			t.Errorf("pdir_fid = %q, want 0(分享根目录)", q.Get("pdir_fid"))
-		}
-		if q.Get("_size") != "50" {
-			t.Errorf("_size = %q, want 50", q.Get("_size"))
-		}
-		if q.Get("_fetch_total") != "1" {
-			t.Errorf("_fetch_total = %q, want 1", q.Get("_fetch_total"))
-		}
-		if q.Get("_sort") != "file_type:asc,updated_at:desc" {
-			t.Errorf("_sort = %q, want file_type:asc,updated_at:desc", q.Get("_sort"))
+		// 整条 RawQuery 逐字比对(§2.8 ② URL 模板,含参数顺序):
+		// 固定参数(force/_fetch_banner/_fetch_share/_fetch_total/
+		// _sort/ver/fetch_share_full_path 等)全串锁定;动态值
+		// pwd_id/stoken/pdir_fid 按实现同款 url.QueryEscape 构造期望
+		// (本用例取值无特殊字符,转义为恒等);_page 由下方 switch
+		// 限定恰为 1/2。
+		wantQuery := "pr=ucpro&fr=pc&pwd_id=" + url.QueryEscape("shpwd1") +
+			"&stoken=" + url.QueryEscape("st-xyz") +
+			"&pdir_fid=" + url.QueryEscape("0") +
+			"&force=0&_page=" + q.Get("_page") + "&_size=50" +
+			"&_fetch_banner=0&_fetch_share=0&_fetch_total=1" +
+			"&_sort=file_type:asc,updated_at:desc&ver=2&fetch_share_full_path=0"
+		if r.URL.RawQuery != wantQuery {
+			t.Errorf("RawQuery 逐字比对失败:\n got  %q\n want %q", r.URL.RawQuery, wantQuery)
 		}
 		switch q.Get("_page") {
 		case "1":
@@ -177,7 +176,9 @@ func TestShareListEmptyPageStops(t *testing.T) {
 }
 
 // TestDriveListPaging 验证 §2.8 ⑤:file/sort 同分页规则(50+10=60,
-// 恰好 2 次请求);dir 映射正确;响应无 share_fid_token 字段时保持零值。
+// 恰好 2 次请求);整条 RawQuery 与 §2.8 ⑤ 模板逐字比对(全部固定
+// 参数与顺序逐字锁定,uc_param_str 必须为空值);dir 映射正确;
+// 响应无 share_fid_token 字段时保持零值。
 func TestDriveListPaging(t *testing.T) {
 	var n atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -187,14 +188,19 @@ func TestDriveListPaging(t *testing.T) {
 		}
 		n.Add(1)
 		q := r.URL.Query()
-		if q.Get("pr") != "ucpro" || q.Get("fr") != "pc" {
-			t.Errorf("query = %q, 应含 pr=ucpro&fr=pc", r.URL.RawQuery)
-		}
-		if q.Get("pdir_fid") != "dirfid9" {
-			t.Errorf("pdir_fid = %q, want dirfid9", q.Get("pdir_fid"))
-		}
-		if q.Get("_size") != "50" || q.Get("_fetch_total") != "1" {
-			t.Errorf("_size/_fetch_total = %q/%q, want 50/1", q.Get("_size"), q.Get("_fetch_total"))
+		// 整条 RawQuery 逐字比对(§2.8 ⑤ URL 模板,含参数顺序):
+		// 固定参数(uc_param_str 空值/_fetch_sub_dirs/_fetch_total/
+		// _sort/_fetch_full_path/fetch_all_file/fetch_risk_file_name)
+		// 全串锁定——uc_param_str 必须以空值出现,缺失同样判失败;
+		// 动态值 pdir_fid 按实现同款 url.QueryEscape 构造期望(本用例
+		// 取值无特殊字符,转义为恒等);_page 由下方 switch 限定恰为 1/2。
+		wantQuery := "pr=ucpro&fr=pc&uc_param_str=&pdir_fid=" + url.QueryEscape("dirfid9") +
+			"&_page=" + q.Get("_page") +
+			"&_size=50&_fetch_total=1&_fetch_sub_dirs=0" +
+			"&_sort=file_type:asc,updated_at:desc&_fetch_full_path=0" +
+			"&fetch_all_file=1&fetch_risk_file_name=1"
+		if r.URL.RawQuery != wantQuery {
+			t.Errorf("RawQuery 逐字比对失败:\n got  %q\n want %q", r.URL.RawQuery, wantQuery)
 		}
 		switch q.Get("_page") {
 		case "1":
