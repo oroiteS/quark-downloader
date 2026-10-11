@@ -66,22 +66,26 @@ func TestQuickCheckInvalid(t *testing.T) {
 	}
 }
 
-// TestQuickCheckConservative 验证保守语义(§2.6):除 401/412 外的一切失败
-// (传输层错误、HTTP 500)都保守视为仍有效,返回 (true, 零值, nil),
-// 避免网络抖动误杀登录态。
+// TestQuickCheckConservative 验证保守语义(§2.6):wall 域失败后业务域
+// file/sort 兜底也拿不到确定性 401/412 时,保守视为仍有效,
+// 返回 (true, 零值, nil),避免网络抖动误杀登录态。
 func TestQuickCheckConservative(t *testing.T) {
-	s := newTestSession(nil, NewCookieJar())
-	s.wall = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+	// wall 域与业务域兜底都传输层失败 → 保守 true。
+	failClient := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("网络不可达")
 	})}
+	s := newTestSession(failClient, NewCookieJar())
+	s.wall = failClient
 	ok, info, err := s.QuickCheck(context.Background())
 	if !ok || err != nil {
-		t.Errorf("传输层失败: got (%v, %v), want (true, nil)", ok, err)
+		t.Errorf("两级传输层失败: got (%v, %v), want (true, nil)", ok, err)
 	}
 	if info != (AccountInfo{}) {
-		t.Errorf("传输层失败: info 应为零值, got %+v", info)
+		t.Errorf("两级传输层失败: info 应为零值, got %+v", info)
 	}
 
+	// wall 域 HTTP 500(拿不到 401/412/200 判定)→ 转业务域兜底,
+	// 兜底同样传输层失败 → 仍保守 true。
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -91,10 +95,47 @@ func TestQuickCheckConservative(t *testing.T) {
 
 	ok, info, err = s.QuickCheck(context.Background())
 	if !ok || err != nil {
-		t.Errorf("HTTP 500: got (%v, %v), want (true, nil)", ok, err)
+		t.Errorf("HTTP 500 + 兜底失败: got (%v, %v), want (true, nil)", ok, err)
 	}
 	if info != (AccountInfo{}) {
-		t.Errorf("HTTP 500: info 应为零值, got %+v", info)
+		t.Errorf("HTTP 500 + 兜底失败: info 应为零值, got %+v", info)
+	}
+}
+
+// TestQuickCheckFileSortFallback 验证 §2.6 业务域兜底:wall 域 account/info
+// 网络失败时,应再用业务客户端(s.client)GET file/sort——401/412 →
+// (false, 零值, nil);200 → 保守 (true, 零值, nil)(file/sort 响应
+// 无账号数据)。兜底 URL 与保活心跳同形态。
+func TestQuickCheckFileSortFallback(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusPreconditionFailed, http.StatusOK} {
+		want := status != http.StatusUnauthorized && status != http.StatusPreconditionFailed
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/1/clouddrive/file/sort" {
+				t.Errorf("file/sort HTTP %d: 兜底路径 = %q, want /1/clouddrive/file/sort", status, r.URL.Path)
+			}
+			q := r.URL.Query()
+			if q.Get("pdir_fid") != "0" || q.Get("_page") != "1" || q.Get("_size") != "1" {
+				t.Errorf("file/sort HTTP %d: 兜底查询串 = %q, want pdir_fid=0&_page=1&_size=1", status, r.URL.RawQuery)
+			}
+			w.WriteHeader(status)
+		}))
+
+		s := newTestSession(srv.Client(), NewCookieJar())
+		// wall 客户端必错:逼 QuickCheck 走 §2.6 的业务域兜底。
+		s.wall = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("wall 域不可达")
+		})}
+		s.base.pan = srv.URL
+		s.base.drivePC = srv.URL
+
+		ok, info, err := s.QuickCheck(context.Background())
+		if ok != want || err != nil {
+			t.Errorf("file/sort HTTP %d: got (%v, %v), want (%v, nil)", status, ok, err, want)
+		}
+		if info != (AccountInfo{}) {
+			t.Errorf("file/sort HTTP %d: 兜底路径无账号信息, got %+v", status, info)
+		}
+		srv.Close()
 	}
 }
 
@@ -127,8 +168,9 @@ func TestQuickCheckSuccess(t *testing.T) {
 	}
 }
 
-// TestQuickCheckTimeoutCap 证明快速校验的单次超时(§2.6 规定 10s,此处注入
-// 40ms)真实生效:服务端睡眠超过超时 → 请求被打断 → 按网络失败保守视为有效。
+// TestQuickCheckTimeoutCap 证明快速校验的超时(§2.6 规定 10s,此处注入
+// 40ms)约束整个流程:wall 域请求睡超超时被打断,业务域兜底在同一已到期
+// ctx 下立即失败 → 按网络失败保守视为有效,不真实发第二个请求。
 func TestQuickCheckTimeoutCap(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(250 * time.Millisecond)
@@ -139,6 +181,10 @@ func TestQuickCheckTimeoutCap(t *testing.T) {
 	s := newTestSession(nil, NewCookieJar())
 	s.wall = srv.Client()
 	s.base.pan = srv.URL
+	// 业务域兜底必错:超时到期后探测立即失败,零真实网络。
+	s.client = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("业务域不可达")
+	})}
 	s.quickCheckTimeout = 40 * time.Millisecond
 
 	start := time.Now()

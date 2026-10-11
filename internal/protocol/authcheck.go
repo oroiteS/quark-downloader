@@ -1,7 +1,8 @@
 // authcheck.go 实现登录态校验与保活心跳(规格 §2.6):
 // LoginState 以 __puus 判定登录;QuickCheck 用 account/info 快速校验,
-// 除 401/412 外的一切失败保守视为有效;StartKeepalive 每 5min(首次相位
-// 随机 50%–100%)心跳一次 file/sort,连续 2 次失败判定登录过期并通知。
+// 失败再试 file/sort 业务域兜底,除 401/412 外的一切失败保守视为有效;
+// StartKeepalive 每 5min(首次相位随机 50%–100%)心跳一次 file/sort,
+// 连续 2 次失败判定登录过期并通知。
 package protocol
 
 import (
@@ -25,26 +26,32 @@ func (s *Session) LoginState() bool {
 // exchangeRequest,与换 Cookie 流程同源。
 //
 //   - HTTP 401/412 → (false, 零值, nil):登录已失效;
-//   - 其它一切失败(网络错误、超时、5xx 等)→ (true, 零值, nil):
-//     保守视为仍有效,避免网络抖动误杀登录态(规格明示);
+//   - 其它失败(网络错误、超时、5xx 等,即拿不到 401/412/200 确定性
+//     判定)→ 按规格再用业务客户端(s.client)GET file/sort 兜底
+//     (受同一超时 ctx 约束):兜底 401/412 → (false, 零值, nil);
+//     其余一切结果(成功或失败)→ (true, 零值, nil) 保守视为仍有效,
+//     避免网络抖动误杀登录态(规格明示);
 //   - HTTP 200 → (true, 账号信息, nil):昵称/头像取自响应 data。
 //
-// error 恒为 nil,保留在签名中是为接口稳定。规格"失败再试 file/sort"
-// 的兜底被保守语义覆盖:凡拿不到确定性 401/412 一律视为有效。
+// error 恒为 nil,保留在签名中是为接口稳定。
 func (s *Session) QuickCheck(ctx context.Context) (bool, AccountInfo, error) {
 	var info AccountInfo
 	timeout := s.quickCheckTimeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	// WithTimeout 取父 ctx 与 timeout 中较早的截止时刻。
+	// WithTimeout 取父 ctx 与 timeout 中较早的截止时刻;
+	// wall 域主探测与业务域兜底共用,总耗时被截在超时内。
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	status, raw, err := s.exchangeRequest(ctx, s.wall,
 		s.base.pan+"/account/info?fr=pc&platform=pc", "")
-	if err != nil {
-		return true, info, nil // 网络失败:保守视为仍有效
+	if err != nil || (status != http.StatusOK &&
+		status != http.StatusUnauthorized && status != http.StatusPreconditionFailed) {
+		// §2.6:wall 域失败(网络错误或拿不到 401/412/200 判定)
+		// 再试 file/sort 业务接口。
+		return s.probeFileSort(ctx), info, nil
 	}
 	if status == http.StatusUnauthorized || status == http.StatusPreconditionFailed {
 		return false, info, nil
@@ -56,6 +63,20 @@ func (s *Session) QuickCheck(ctx context.Context) (bool, AccountInfo, error) {
 		_ = json.Unmarshal(env.Data, &info)
 	}
 	return true, info, nil
+}
+
+// probeFileSort 是 §2.6 的业务域兜底:wall 域 account/info 失败后,
+// 经业务客户端(drive-pc 域无指纹墙)GET file/sort——URL 与保活心跳
+// (keepalivePing)同形态。兜底 401/412 → false(登录已失效);
+// 其余一切结果(成功、网络失败、超时、其它状态码)→ 保守 true。
+// 成功也拿不到账号信息(file/sort 响应无账号数据),故不返回 info。
+func (s *Session) probeFileSort(ctx context.Context) bool {
+	status, _, err := s.exchangeRequest(ctx, s.client,
+		s.base.drivePC+"/1/clouddrive/file/sort?pdir_fid=0&_page=1&_size=1", "")
+	if err != nil {
+		return true // 网络失败:保守视为仍有效
+	}
+	return status != http.StatusUnauthorized && status != http.StatusPreconditionFailed
 }
 
 // StartKeepalive 启动保活心跳 goroutine(§2.6):首次延迟周期×(0.5~1.0)
