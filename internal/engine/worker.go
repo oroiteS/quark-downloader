@@ -2,7 +2,7 @@
 //
 //	N = min(用户档位, 片数, 512)
 //	冷启动错峰 sleep(ramp × w / N)；片队列 segQueue 支持抢占重入（MPMC 工作窃取）
-//	每片：gate.Acquire → W≥片大小跳过 → 片级重试循环（≤4 次, BackoffSeg 退避,
+//	每片：gate.Acquire → W≥片大小跳过 → 片级重试循环（1 首试 + ≤4 重试, BackoffSeg 退避,
 //	从 S+W 断点续, §3.10）→ 独立开流 Seek(S+W) → io.CopyBuffer 流写 → 写完即关
 //	收尾（§3.10）：finalizeCleanup 按错误分类表处置半成品（删/留/转单线程/4xx 兜底）
 //	监视线程：200ms 采样速度 + 每 1s 全量 SaveQMeta
@@ -222,7 +222,8 @@ func (t *Task) workerA(ctx context.Context, w, n int, queue *segQueue) {
 }
 
 // fetchSeg 下载单片（§3.10 片级重试）：闸门 → 续传跳过 → 重试循环
-// （≤4 次尝试，尝试间 BackoffSeg 退避，每次从 S+W 断点续——不重复下载）。
+// （首试 + ≤4 次重试共 ≤5 次尝试（Ruling E3），尝试间 BackoffSeg 退避，
+// 每次从 S+W 断点续——不重复下载）。
 // 片级取消令牌（§3.5）独立登记，生命周期 = 整片（含退避等待）：Task 10
 // 抢占看门狗 cancelSeg(idx) 只掐本片、不污染全局。「先判抢占再判取消」
 // 的顺序判定框架在这里（Task 10 复用）：抢占 → errPreempted 交 workerA
@@ -285,7 +286,9 @@ func (t *Task) fetchSeg(ctx context.Context, idx int, buf []byte, rng *rand.Rand
 		if !retryableSeg(err) {
 			return err // 200/403 等致命类：重试无意义
 		}
-		if attempt >= segRetryMax-1 {
+		// attempt 从 0 起计失败次数：首试失败后已重试 attempt 次；仅当
+		// 首试 + segRetryMax 次重试（第 5 次尝试）仍失败才耗尽（Ruling E3）。
+		if attempt >= segRetryMax {
 			// §3.10「片重试耗尽」：入 errors、任务失败（终判归 Task 11）。
 			// 保留底层 Status——416 等可重试类耗尽后仍是 4xx，兜底判据
 			//（causeIs4xx）要能认出。
@@ -293,7 +296,7 @@ func (t *Task) fetchSeg(ctx context.Context, idx int, buf []byte, rng *rand.Rand
 				Kind:   KindRetryExhausted,
 				Status: statusOf(err),
 				Cause:  err,
-				Detail: fmt.Sprintf("片 %d 尝试 %d 次耗尽", idx, segRetryMax),
+				Detail: fmt.Sprintf("片 %d 尝试 %d 次耗尽", idx, segRetryMax+1),
 			}
 		}
 		// 退避等待（§3.10 逐字：重试等待期间可被抢占/取消）：监听片级

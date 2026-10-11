@@ -542,7 +542,8 @@ func TestRunASegRetryResume(t *testing.T) {
 }
 
 // 片重试耗尽入 errors（§3.10「片重试耗尽 / 任务失败」行）：单片恒短体，
-// 总尝试 ≤4 次（§3.5「片级重试循环（最多 4 次）」），耗尽后任务失败、
+// 首试 + 4 次重试共 5 次尝试（Ruling E3：§3.10「最多 4 次**重试**」指
+// 重试次数而非总尝试，退避 BackoffSeg(0..3) 共 4 次），耗尽后任务失败、
 // firstErr 带 KindRetryExhausted 且链上可挖到 errShortBody；半成品保留
 // （终判归 Task 11，本任务只负责不计成成功）。
 func TestRunASegRetryExhausted(t *testing.T) {
@@ -577,11 +578,11 @@ func TestRunASegRetryExhausted(t *testing.T) {
 	if !errors.Is(err, errShortBody) {
 		t.Errorf("耗尽错误应保留底层原因 errShortBody, got %v", err)
 	}
-	if n := hits.Load(); n != 4 {
-		t.Errorf("尝试次数 = %d, want 4（片级重试循环最多 4 次）", n)
+	if n := hits.Load(); n != 5 {
+		t.Errorf("尝试次数 = %d, want 5（1 次首试 + 4 次重试，Ruling E3）", n)
 	}
-	if n := sr.count(); n != 3 {
-		t.Errorf("退避等待次数 = %d, want 3（4 次尝试之间 3 次退避）", n)
+	if n := sr.count(); n != 4 {
+		t.Errorf("退避等待次数 = %d, want 4（5 次尝试之间 4 次退避）", n)
 	}
 	if p := tk.progress(); p.State != "error" {
 		t.Errorf("终态 = %q, want error", p.State)

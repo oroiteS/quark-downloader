@@ -177,9 +177,10 @@ func causeIs4xx(err error) bool {
 	return false
 }
 
-// segRetryMax 片级重试循环上限（§3.5「片级重试循环（最多 4 次）」：
-// 循环体 = 一次 GET 尝试，即每片总尝试 ≤ 4；§3.10「每片独立，最多
-// 4 次」同义）。尝试间退避 BackoffSeg(0..2)。
+// segRetryMax 片级重试上限（Ruling E3）：重试**次数**（不含首次尝试）。
+// §3.10「每片独立，最多 4 次**重试**」与 §7 常数表「片重试 ≤4 次」一致：
+// 总尝试 = 1 + segRetryMax = 5 次（耗尽判定在第 5 次尝试失败后触发），
+// 尝试间退避 BackoffSeg(0..3) 共 4 次（上界 500ms×8×1.4=5.6s）。
 const segRetryMax = 4
 
 // BackoffSeg 片级重试退避（§3.10 逐字）：500ms × 2^attempt × (0.6+0.8r)。
