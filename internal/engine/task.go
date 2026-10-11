@@ -86,6 +86,11 @@ type Task struct {
 	sampleEvery time.Duration // 监视线程速度采样节拍（§3.12：200ms）
 	qmetaEvery  time.Duration // 监视线程 SaveQMeta 周期（§3.6：1s）
 
+	// ---- Task 8（§3.10）----
+	segMu     sync.Mutex                                 // segCancel 的锁
+	segCancel map[int]context.CancelFunc                 // 片级取消令牌注册表（§3.5）：Task 10 抢占看门狗 cancelSeg(idx) 只掐本片
+	sleep     func(context.Context, time.Duration) error // 片级重试退避等待（生产 sleepCtx；测试注入桩）
+
 	// ---- 钩子（nil 安全；Task 14 / 测试装配）----
 	onEvent       func(Progress) // 进度事件回调（监视线程节拍驱动）
 	onWorkerStart func(w int)    // worker 冷启动完成钩子（错峰观测）
@@ -120,6 +125,7 @@ func newTask(id, dest, url, cookieStr string, threads int, total int64) *Task {
 		ramp:        Ramp(n),                // N>256 ? 6s : 3s（§3.3）
 		sampleEvery: 200 * time.Millisecond, // §3.12
 		qmetaEvery:  time.Second,            // §3.6
+		sleep:       sleepCtx,               // §3.10 片级重试退避等待
 	}
 }
 

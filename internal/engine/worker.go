@@ -1,9 +1,10 @@
-// 模式 A worker 主循环（§3.5「并发模型」模式 A 部分，逐字伪代码）：
+// 模式 A worker 主循环（§3.5「并发模型」+ §3.10「重试与错误分类」）：
 //
 //	N = min(用户档位, 片数, 512)
-//	冷启动错峰 sleep(ramp × w / N)；片队列 chan int 即工作窃取（MPMC）
-//	每片：gate.Acquire → W≥片大小跳过 → 片级 ctx → GET Range →
-//	独立开流 Seek(S+W) → io.CopyBuffer 流写 → 写完即关（记账=盘上）
+//	冷启动错峰 sleep(ramp × w / N)；片队列 segQueue 支持抢占重入（MPMC 工作窃取）
+//	每片：gate.Acquire → W≥片大小跳过 → 片级重试循环（≤4 次, BackoffSeg 退避,
+//	从 S+W 断点续, §3.10）→ 独立开流 Seek(S+W) → io.CopyBuffer 流写 → 写完即关
+//	收尾（§3.10）：finalizeCleanup 按错误分类表处置半成品（删/留/转单线程/4xx 兜底）
 //	监视线程：200ms 采样速度 + 每 1s 全量 SaveQMeta
 package engine
 
@@ -12,26 +13,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	rand "math/rand/v2"
 	"net/http"
 	"os"
 	"sync"
 	"time"
-)
 
-var (
-	// errRangeIgnored：分片请求得到非 206（典型 200——服务器无视 Range）。
-	// 分片写会从片偏移写坏整个文件，绝不能落盘；本任务记为致命错误
-	// 终止任务，Task 8 接手转「单线程整下」fallback（§3.5）。
-	errRangeIgnored = errors.New("feiwu: 服务器忽略 Range（分片请求得到非 206）")
-
-	// errShortBody：206 响应体在区间末尾之前提前结束（连接半途断开等）。
-	// 本任务同样记致命错误，Task 8 换成片级重试（§3.10）。
-	errShortBody = errors.New("feiwu: 片响应体短于请求区间")
+	"quark-downloader/internal/protocol"
 )
 
 // runA 装配并运行模式 A 主循环（§3.5 模式 A）。ctx 是任务级生命周期：
 // 取消即全体退出（错误=ctx.Err()、终态=canceled）。W 为恢复对账后的
 // 记账起点（全新任务全零），完成后 W 全满且 .qmeta 留有完成凭证。
+// 失败/取消收尾走 finalizeCleanup（§3.10）——Range 不支持转单线程、
+// 4xx 零进度两组净头兜底可能在这里翻转终态。
 func (t *Task) runA(ctx context.Context) error {
 	if len(t.Segs) == 0 {
 		return errors.New("feiwu: 任务无分片（total 非法或 plan 为空）")
@@ -43,7 +38,7 @@ func (t *Task) runA(ctx context.Context) error {
 		return fmt.Errorf("feiwu: 并发档位非法 Threads=%d（应 ≥ 1）", t.Threads)
 	}
 	t.state.Store(int32(stateRunning))
-	parent := ctx // 外部任务生命周期；终态判定盯它（派生 ctx 还被自己收尾掐）
+	parent := ctx // 外部任务生命周期；终态判定与用户取消判定盯它
 	ctx, cancel := context.WithCancel(parent)
 	t.cancel = cancel
 	defer cancel()
@@ -57,14 +52,11 @@ func (t *Task) runA(ctx context.Context) error {
 		return err
 	}
 
-	// ⑤ 片队列：chan int 缓冲 MAX_SEG，全片入队不阻塞；close 后取尽
-	// 即自然退出。Go channel 即 MPMC 工作窃取——快 worker 干完立刻取
-	// 下一片，慢连接只拖自己那一小片（§3.3 设计原理）。
-	queue := make(chan int, segCountMax)
-	for i := range t.Segs {
-		queue <- i
-	}
-	close(queue)
+	// ⑤ 片队列：抢占可重入（§3.10 抢占重入队）。closed channel 做不到
+	// 「取尽后再投」，故用锁+条件变量的 segQueue：pending 空但仍有
+	// worker 持片（可能被 Task 10 掐了重入）时等待，两者皆空才排干。
+	// 快 worker 干完立刻取下一片，慢连接只拖自己那一小片（§3.3）。
+	queue := newSegQueue(len(t.Segs))
 
 	// N = min(用户档位, 片数, 512)（§3.5）。与 newTask 同式 max(...,1) 下钳
 	// （审查 F1）：两处算法统一成结构不变量——即使入口守卫日后被重构掉，
@@ -104,6 +96,20 @@ func (t *Task) runA(ctx context.Context) error {
 	default:
 		t.state.Store(int32(stateDone))
 	}
+
+	// §3.10 收尾：错误分类 → 半成品生死（删/留/转单线程）+ 4xx 零进度
+	// 兜底。兜底成功会翻转终态为 done；兜底途中用户取消按取消归类。
+	if err != nil {
+		err = t.finalizeCleanup(parent, err)
+		switch {
+		case err == nil:
+			t.state.Store(int32(stateDone))
+		case isCancellation(err):
+			t.state.Store(int32(stateCanceled))
+		default:
+			t.state.Store(int32(stateError))
+		}
+	}
 	return err
 }
 
@@ -122,8 +128,62 @@ func (t *Task) preallocate() error {
 	return nil
 }
 
-// workerA 是单个 worker 的主循环（§3.5 伪代码逐字）。
-func (t *Task) workerA(ctx context.Context, w, n int, queue <-chan int) {
+// segQueue 片队列：MPMC 工作窃取 + 抢占重入（§3.5/§3.10）。
+type segQueue struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	pending []int // 待取片
+	active  int   // 正被 worker 持有的片数
+}
+
+func newSegQueue(n int) *segQueue {
+	q := &segQueue{pending: make([]int, n)}
+	for i := range q.pending {
+		q.pending[i] = i
+	}
+	q.cond = sync.NewCond(&q.mu)
+	return q
+}
+
+// pop 取一片：有则弹（FIFO，快 worker 窃慢片的公平性由队列唯一分发
+// 保证）；pending 空但 active>0（有片在飞，可能被抢占重入）则等待；
+// 两者皆空宣告排干，worker 退出。
+func (q *segQueue) pop() (int, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for {
+		if len(q.pending) > 0 {
+			idx := q.pending[0]
+			q.pending = q.pending[1:]
+			q.active++
+			return idx, true
+		}
+		if q.active == 0 {
+			return 0, false
+		}
+		q.cond.Wait()
+	}
+}
+
+// release 片处理完毕（成功/失败），归还持有计数。
+func (q *segQueue) release() {
+	q.mu.Lock()
+	q.active--
+	q.mu.Unlock()
+	q.cond.Broadcast()
+}
+
+// requeue 抢占重入（§3.10）：所有权从 worker 直接转回队列，不计失败。
+func (q *segQueue) requeue(idx int) {
+	q.mu.Lock()
+	q.pending = append(q.pending, idx)
+	q.active--
+	q.mu.Unlock()
+	q.cond.Broadcast()
+}
+
+// workerA 是单个 worker 的主循环（§3.5 伪代码 + §3.10 重试/抢占消化）。
+func (t *Task) workerA(ctx context.Context, w, n int, queue *segQueue) {
 	// 冷启动错峰（§3.5）：几百路同时发起 = 同时几百次 TLS 握手，拖慢
 	// 首字节且易触发风控。w=0 睡 0 立即起步；ctx 取消随时可醒。
 	if d := t.ramp * time.Duration(w) / time.Duration(n); d > 0 {
@@ -137,18 +197,39 @@ func (t *Task) workerA(ctx context.Context, w, n int, queue <-chan int) {
 		t.onWorkerStart(w)
 	}
 	buf := make([]byte, BufSize(n)) // 读缓冲 ~64MB/N，总内存钉住（§3.3）
-	for idx := range queue {
-		if err := t.fetchSeg(ctx, idx, buf); err != nil {
-			t.fail(err)
-			return // 致命错误：本 worker 退出，级联取消已由 fail 发出
+	// 随机源（§3.10 逐字）：每 worker 独立实例——共享一个实例会被并发
+	// 调用互踩状态，「抖动」退化成同步退避，恰好促成重试风暴。
+	rng := rand.New(rand.NewPCG(uint64(w)+1, uint64(time.Now().UnixNano())))
+	for {
+		idx, ok := queue.pop()
+		if !ok {
+			return
+		}
+		err := t.fetchSeg(ctx, idx, buf, rng)
+		switch {
+		case err == nil:
+			queue.release()
+		case errors.Is(err, errPreempted):
+			// 先判抢占（§3.10/Task 10 框架）：片重新入队、不计失败、
+			// 不退避、不留错误标记（fetchSeg 返回即弃暂态错误）。
+			queue.requeue(idx)
+		default:
+			queue.release()
+			t.fail(err) // 致命错误：本 worker 退出，级联取消已由 fail 发出
+			return
 		}
 	}
 }
 
-// fetchSeg 下载单片：闸门 → 续传跳过 → Range GET → 独立开流写完即关。
+// fetchSeg 下载单片（§3.10 片级重试）：闸门 → 续传跳过 → 重试循环
+// （≤4 次尝试，尝试间 BackoffSeg 退避，每次从 S+W 断点续——不重复下载）。
+// 片级取消令牌（§3.5）独立登记，生命周期 = 整片（含退避等待）：Task 10
+// 抢占看门狗 cancelSeg(idx) 只掐本片、不污染全局。「先判抢占再判取消」
+// 的顺序判定框架在这里（Task 10 复用）：抢占 → errPreempted 交 workerA
+// 重入队；取消 → 按取消归类（runA 归 canceled 终态）。
 // W[idx] 只被持有本片的 worker 读写（队列唯一分发），记账增量的锁只为
 // 监视线程的快照读（wmu）。
-func (t *Task) fetchSeg(ctx context.Context, idx int, buf []byte) error {
+func (t *Task) fetchSeg(ctx context.Context, idx int, buf []byte, rng *rand.Rand) error {
 	s := t.Segs[idx]
 	size := s.End - s.Start + 1
 
@@ -163,12 +244,80 @@ func (t *Task) fetchSeg(ctx context.Context, idx int, buf []byte) error {
 		return nil
 	}
 
-	// 片级取消（§3.5）：抢占只掐当前片，不污染全局。本任务从任务 ctx
-	// 派生即可；Task 8/10 换成独立片级令牌（引擎 client 无独立拨号
-	// 超时——片级请求生命周期全由这个 ctx 控制）。
-	sctx, cancelSeg := context.WithCancel(ctx)
-	defer cancelSeg()
+	// 片级令牌（§3.5）：抢占只掐当前片，不污染全局。懒初始化注册表
+	//（直接构造 Task 的测试路径无 newTask）。
+	sctx, cancelSegCtx := context.WithCancel(ctx)
+	t.segMu.Lock()
+	if t.segCancel == nil {
+		t.segCancel = make(map[int]context.CancelFunc)
+	}
+	t.segCancel[idx] = cancelSegCtx
+	t.segMu.Unlock()
+	defer func() {
+		t.segMu.Lock()
+		delete(t.segCancel, idx)
+		t.segMu.Unlock()
+		cancelSegCtx()
+	}()
 
+	// 退避等待注入点（nil 防御：直接构造 Task 的路径无 newTask 默认值）。
+	sleepFn := t.sleep
+	if sleepFn == nil {
+		sleepFn = sleepCtx
+	}
+
+	for attempt := 0; ; attempt++ {
+		err := t.fetchOnce(sctx, idx, buf)
+		if err == nil {
+			return nil
+		}
+		// ① 先判抢占（Task 10 顺序判定框架）：片级令牌已取消而全局
+		//    未取消 → 抢占，交 workerA 重入队（不计失败、不退避）。
+		if sctx.Err() != nil && ctx.Err() == nil {
+			return errPreempted
+		}
+		// ② 再判取消：全局取消按取消归类（审查 F2 的分类点统一在此，
+		//    「干净 EOF + 取消」竞态不再误判短体致命——短体已可重试，
+		//    取消则根本不该重试）。
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		if !retryableSeg(err) {
+			return err // 200/403 等致命类：重试无意义
+		}
+		if attempt >= segRetryMax-1 {
+			// §3.10「片重试耗尽」：入 errors、任务失败（终判归 Task 11）。
+			// 保留底层 Status——416 等可重试类耗尽后仍是 4xx，兜底判据
+			//（causeIs4xx）要能认出。
+			return &TaskError{
+				Kind:   KindRetryExhausted,
+				Status: statusOf(err),
+				Cause:  err,
+				Detail: fmt.Sprintf("片 %d 尝试 %d 次耗尽", idx, segRetryMax),
+			}
+		}
+		// 退避等待（§3.10 逐字：重试等待期间可被抢占/取消）：监听片级
+		// 令牌与任务 ctx，先判抢占再判取消（同上）。
+		if werr := sleepFn(sctx, BackoffSeg(attempt, rng.Float64())); werr != nil {
+			if sctx.Err() != nil && ctx.Err() == nil {
+				return errPreempted
+			}
+			if cerr := ctx.Err(); cerr != nil {
+				return cerr
+			}
+			return werr
+		}
+	}
+}
+
+// fetchOnce 单次片尝试（fetchSeg 重试循环的循环体）：Range GET → 独立
+// 开流 Seek(S+W) → 写 → 写完即关。错误分类（Task 7 交接的非 206 分化）：
+// 200 = 服务器无视 Range，分片写会从片偏移写坏整个文件——一个字节都
+// 不读；408/416/429/5xx → 片级可重试；其余 4xx = 确定性拒绝（不重试，
+// 失败后走任务级 4xx 兜底判据）。短体（§3.10 重审：连接中断的可恢复
+// 形态，W 已记账、断点续不重复下载）同样返回可重试错误。
+func (t *Task) fetchOnce(sctx context.Context, idx int, buf []byte) error {
+	s := t.Segs[idx]
 	w := t.W[idx]
 	req, err := http.NewRequestWithContext(sctx, http.MethodGet, t.URL, nil)
 	if err != nil {
@@ -183,11 +332,20 @@ func (t *Task) fetchSeg(ctx context.Context, idx int, buf []byte) error {
 	}
 	defer resp.Body.Close()
 
-	// 非 206（典型 200 = 服务器忽略 Range）：body 是全文件，从片偏移
-	// 写进去会写坏整个文件——一个字节都不读，记错误语义（Task 8 转
-	// 单线程整下）。
 	if resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("片 %d: %w（得到 %d）", idx, errRangeIgnored, resp.StatusCode)
+		if resp.StatusCode == http.StatusOK {
+			return &TaskError{
+				Kind:   KindRangeUnsupported,
+				Status: http.StatusOK,
+				Cause:  ErrRangeUnsupported,
+				Detail: fmt.Sprintf("片 %d: 服务器无视 Range 回 200", idx),
+			}
+		}
+		return &TaskError{
+			Kind:   httpKind(resp.StatusCode),
+			Status: resp.StatusCode,
+			Detail: fmt.Sprintf("片 %d: 状态 %d", idx, resp.StatusCode),
+		}
 	}
 
 	// 每片独立开流 → Seek(S+W) → 写 → 写完即关（§3.5：关闭即 flush，
@@ -201,23 +359,178 @@ func (t *Task) fetchSeg(ctx context.Context, idx int, buf []byte) error {
 		return fmt.Errorf("feiwu: Seek 到 %d 失败: %w", s.Start+w, err)
 	}
 
-	remain := size - w
+	remain := s.End - s.Start + 1 - w
 	cw := &segWriter{t: t, idx: idx, f: f} // 边写边记账（W/done 逐块递增）
 	written, err := io.CopyBuffer(cw, io.LimitReader(resp.Body, remain), buf)
 	if err != nil {
 		return fmt.Errorf("片 %d 写入失败: %w", idx, err)
 	}
 	if written < remain { // LimitReader 防越界：多余字节绝不越过片尾
-		// 取消优先分类（审查 F2）：用户 cancel 与服务器干净断连同瞬时，
-		// body 读以 io.EOF 干净收场（err=nil），径直判 errShortBody 会把
-		// 取消归为终态 error。先查 ctx：已取消即返回 ctx.Err()（fail 按
-		// 取消不记 firstErr，runA 末尾归 canceled）。
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+		// 取消/抢占的归类统一交给 fetchSeg 的顺序判定（①②），这里只报
+		// 短体事实（已可重试，从 S+W 断点续）。
 		return fmt.Errorf("片 %d: %w（要 %d 得 %d）", idx, errShortBody, remain, written)
 	}
 	return nil
+}
+
+// cancelSeg 掐断片 idx 的片级取消令牌（§3.5/§3.7）：只取消该片在飞
+// 请求与退避等待，不污染全局取消。Task 10 抢占看门狗的入口；返回是否
+// 确有在飞令牌。
+func (t *Task) cancelSeg(idx int) bool {
+	t.segMu.Lock()
+	defer t.segMu.Unlock()
+	if c := t.segCancel[idx]; c != nil {
+		c()
+		return true
+	}
+	return false
+}
+
+// fallbackHeaders 直链 4xx 兜底的两组净头（§3.10 逐字：仅 UA+Referer+
+// Origin → 仅 UA）。比全套下载头（§3.4）干净：不带 Cookie/Accept/
+// Sec-Fetch 等字段——4xx 失败常因某些头触发风控差异，逐组收窄定位。
+func fallbackHeaders() []http.Header {
+	h1 := http.Header{}
+	h1.Set("User-Agent", protocol.UserAgent)
+	h1.Set("Referer", "https://pan.quark.cn/")
+	h1.Set("Origin", "https://pan.quark.cn")
+	h2 := http.Header{}
+	h2.Set("User-Agent", protocol.UserAgent)
+	return []http.Header{h1, h2}
+}
+
+// runSingle 单线程全量下载（§3.10：Range 不支持转单线程 / 4xx 零进度
+// 兜底共用）：不带 Range、期望 200，从 0 写满 total（O_TRUNC 重写）；
+// 成功后 W 全满并落 .qmeta 完成凭证（§3.6）。
+func (t *Task) runSingle(ctx context.Context, headers http.Header) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.URL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header = headers
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return &TaskError{
+			Kind:   httpKind(resp.StatusCode),
+			Status: resp.StatusCode,
+			Detail: fmt.Sprintf("单线程全量得到 %d", resp.StatusCode),
+		}
+	}
+	f, err := os.OpenFile(t.Dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("feiwu: 单线程打开目标文件失败: %w", err)
+	}
+	defer f.Close()
+	written, err := io.Copy(f, resp.Body)
+	if err != nil {
+		return fmt.Errorf("feiwu: 单线程写入失败: %w", err)
+	}
+	if written != t.Total {
+		return &TaskError{Kind: KindFatal, Detail: fmt.Sprintf("单线程全量短体（要 %d 得 %d）", t.Total, written)}
+	}
+	t.wmu.Lock()
+	for i, s := range t.Segs {
+		t.W[i] = s.End - s.Start + 1
+	}
+	t.wmu.Unlock()
+	t.done.Store(t.Total)
+	return t.saveMeta() // 完成凭证（best-effort 由调用方口径覆盖）
+}
+
+// removePartial 删除半成品（§3.10 表「删除」动作）：dest + .qmeta
+// （模式 B 的分片目录由 Task 12 并入同一入口）。best-effort：清理失败
+// 不掩盖任务主错误（返回给调用方决定是否忽略）。
+func (t *Task) removePartial() error {
+	err1 := os.Remove(t.Dest)
+	err2 := os.Remove(t.qmetaPath())
+	if err1 != nil && !os.IsNotExist(err1) {
+		return err1
+	}
+	if err2 != nil && !os.IsNotExist(err2) {
+		return err2
+	}
+	return nil
+}
+
+// zeroProgress 磁盘上是否毫无进度（§3.10 兜底判据「.qmeta 全零」）：
+// W 任一片非零即有进度——**有进度则绝不走兜底**（兜底会清空半成品，
+// 不能毁掉用户几小时的进度）。
+func (t *Task) zeroProgress() bool {
+	t.wmu.Lock()
+	defer t.wmu.Unlock()
+	for _, w := range t.W {
+		if w != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// finalizeCleanup 按 §3.10 错误分类表处置半成品并兜底（runA 终态判定
+// 之后调用；返回值是最终任务错误——兜底成功为 nil，终态由调用方翻转）：
+//
+//	中断来源              判据                半成品处理
+//	用户主动取消          外部取消令牌触发    删除 dest + .qmeta（+分片目录）
+//	停滞看门狗中止        stalled 标志        保留（环境问题，可续传）
+//	反压期间取消等        取消但非外部令牌    保留
+//	Range 不支持          分片请求回 200      删除后转单线程全量下载
+//	片重试耗尽/任务失败   errors 非空         见完整性终判（Task 11；保留）
+//	直链 4xx 且磁盘零进度 .qmeta 全零         两组净头按序兜底；有进度绝不走
+func (t *Task) finalizeCleanup(parent context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	// ① stalled 先于取消判定（看门狗中止也伴随内部 cancel，但它是环境
+	//    问题不是用户意志）：断点全保留。
+	if errors.Is(err, ErrStalled) {
+		return err
+	}
+	// ② 取消类：外部取消令牌触发 = 用户主动取消 → 删；其它取消（反压
+	//    等，Task 9/10 引入）→ 保留。用户取消包上 ErrUserCancel 锚点，
+	//    errors.Is 对 ErrUserCancel 与 context.Canceled 双命中。
+	if isCancellation(err) {
+		if parent.Err() != nil {
+			_ = t.removePartial()
+			return fmt.Errorf("%w: %w", ErrUserCancel, err)
+		}
+		return err
+	}
+	// ③ Range 不支持：删后转单线程全量（原全套头；服务器既然无视
+	//    Range，断点无意义，从头整下）。
+	if ClassifyError(err) == KindRangeUnsupported {
+		_ = t.removePartial()
+		if rerr := t.runSingle(parent, DownloadHeaders(t.CookieStr)); rerr == nil {
+			return nil
+		} else if parent.Err() != nil {
+			_ = t.removePartial() // 兜底途中用户取消同样是用户取消：删
+			return parent.Err()   // 按取消归类
+		} else {
+			err = rerr // 转单线程也败：用最新错误继续判 4xx 兜底
+		}
+	}
+	// ④ 直链 4xx 兜底（§3.10 逐字）：失败原因属 4xx（沿 Cause 链下钻，
+	//    含重试耗尽包装下的 416/403）且磁盘零进度 → 按序换两组净头
+	//    单线程全量重试；有进度则绝不走。
+	if causeIs4xx(err) && t.zeroProgress() {
+		for _, h := range fallbackHeaders() {
+			_ = t.removePartial()
+			rerr := t.runSingle(parent, h)
+			if rerr == nil {
+				return nil
+			}
+			if parent.Err() != nil {
+				_ = t.removePartial() // 同上：用户取消的删除语义
+				return parent.Err()
+			}
+			err = rerr
+		}
+	}
+	// ⑤ 片重试耗尽/任务失败：见完整性终判（Task 11）——本任务保留半成品。
+	return err
 }
 
 // segWriter 把「写盘」与「记账」绑成一个动作（§3.5 伪代码
