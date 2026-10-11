@@ -51,6 +51,23 @@ type apiEnvelope struct {
 	Data    json.RawMessage `json:"data"`
 }
 
+// sessionBase 是换 Cookie 流程(§2.5)涉及的三个域 base。URL 拼接一律走本
+// 结构而非硬编码域名,测试把字段指向 httptest 服务即可整体接管域名判断。
+type sessionBase struct {
+	pan     string // pan.quark.cn:account/info、list(过墙域)
+	drivePC string // drive-pc.quark.cn:file/sort
+	drive   string // drive.quark.cn:member
+}
+
+// defaultSessionBase 返回三个域的生产 base(§2.5 逐字)。
+func defaultSessionBase() sessionBase {
+	return sessionBase{
+		pan:     "https://pan.quark.cn",
+		drivePC: "https://drive-pc.quark.cn",
+		drive:   "https://drive.quark.cn",
+	}
+}
+
 // Session 是发往夸克 API 的统一会话:持有 HTTP 客户端、Cookie 整串与节流器。
 // DoAPI 是所有业务接口的唯一出站通道,语义见方法注释。
 type Session struct {
@@ -60,6 +77,11 @@ type Session struct {
 	authHeal func(ctx context.Context) bool
 	// sleep 等待退避时长且尊重 ctx 取消;测试注入 no-op 加速。
 	sleep func(ctx context.Context, d time.Duration) error
+	// wall 是过 TLS 指纹墙的客户端(§2.5 步骤 1/2a 的 pan 域专用),
+	// 默认 NewWallClient(),测试注入普通 client 指向 fake 服务。
+	wall *http.Client
+	// base 是换 Cookie 流程的域 base,见 sessionBase;测试可整体覆盖。
+	base sessionBase
 }
 
 // NewSession 创建会话。httpClient 为 nil 时使用禁用系统代理的默认客户端
@@ -78,6 +100,8 @@ func NewSession(httpClient *http.Client, jar *CookieJar) *Session {
 		jar:      jar,
 		throttle: NewThrottler(),
 		sleep:    sleepContext,
+		wall:     NewWallClient(),
+		base:     defaultSessionBase(),
 	}
 }
 
