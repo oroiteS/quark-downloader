@@ -3,7 +3,9 @@ package protocol
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -133,5 +135,42 @@ func TestThrottlerInterval(t *testing.T) {
 		t.Error("ctx 取消后 Wait 应返回非 nil error")
 	} else if time.Since(start) > 100*time.Millisecond {
 		t.Errorf("ctx 取消后 Wait 仍耗时 %v 才返回", time.Since(start))
+	}
+}
+
+func TestThrottlerConcurrentSpacing(t *testing.T) {
+	const (
+		n         = 5                      // 并发 Wait 的 goroutine 数
+		minGap    = 195 * time.Millisecond // 260ms×0.75,任意两次放行的硬下界
+		tolerance = 30 * time.Millisecond  // 时钟/调度容差
+	)
+
+	// 并发 N 个 goroutine 各调一次 Wait:放行时刻必须在锁内预定,
+	// 否则各自读到同一 last、独立抽取 interval 后分别放行,
+	// 相邻放行间隔可低至两 interval 之差(趋近 0ms)。
+	th := NewThrottler()
+	releases := make([]time.Time, n)
+	gate := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-gate
+			if err := th.Wait(context.Background()); err != nil {
+				t.Errorf("并发 Wait(%d): %v", i, err)
+			}
+			releases[i] = time.Now()
+		}(i)
+	}
+	close(gate)
+	wg.Wait()
+
+	sort.Slice(releases, func(a, b int) bool { return releases[a].Before(releases[b]) })
+	for i := 1; i < len(releases); i++ {
+		if gap := releases[i].Sub(releases[i-1]); gap < minGap-tolerance {
+			t.Errorf("并发下第 %d→%d 次放行间隔 %v,低于下界 %v(容差 %v)",
+				i-1, i, gap, minGap, tolerance)
+		}
 	}
 }
