@@ -327,3 +327,83 @@ func TestAuthHeal(t *testing.T) {
 		t.Errorf("请求数 = %d, 校验次数 = %d, want 2/1(自愈仅一次)", n3.Load(), heals3.Load())
 	}
 }
+
+func TestDoAPIMergeSetCookiesOnRetry(t *testing.T) {
+	// §2.3 规则 2:每次响应的 Set-Cookie 增量合并回 Cookie 串,同名覆盖。
+	// 第 1 次:500 + Set-Cookie: st=v1 → 退避重试;
+	// 第 2 次(重试):请求 Cookie 头应含 st=v1(增量来自上次响应),
+	//   响应再下发 st=v2 验证同名覆盖不丢新值。
+	var n atomic.Int64
+	var firstCookie, secondCookie string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch n.Add(1) {
+		case 1:
+			firstCookie = r.Header.Get("Cookie")
+			w.Header().Set("Set-Cookie", "st=v1; Path=/; Domain=127.0.0.1")
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			secondCookie = r.Header.Get("Cookie")
+			w.Header().Set("Set-Cookie", "st=v2; Path=/")
+			fmt.Fprint(w, `{"status":200,"code":0,"data":{"st":"ok"}}`)
+		}
+	}))
+	defer srv.Close()
+
+	jar := NewCookieJar()
+	data, err := newTestSession(srv.Client(), jar).DoAPI(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("500 带 Set-Cookie 后重试应成功: %v", err)
+	}
+	if string(data) != `{"st":"ok"}` {
+		t.Errorf("data = %q, want %q", string(data), `{"st":"ok"}`)
+	}
+	if n.Load() != 2 {
+		t.Errorf("请求数 = %d, want 2(1 次 500 + 1 次重试)", n.Load())
+	}
+	if strings.Contains(firstCookie, "st=") {
+		t.Errorf("首请求 Cookie = %q, 不应已含 st(st 应来自响应增量)", firstCookie)
+	}
+	if !strings.Contains(secondCookie, "st=v1") {
+		t.Errorf("重试请求 Cookie = %q, 应含首次响应下发的 st=v1(jar 增量合并生效)", secondCookie)
+	}
+	if !strings.Contains(jar.String(), "st=v2") {
+		t.Errorf("jar = %q, 第二次响应再下发的同名 st=v2 应覆盖 st=v1", jar.String())
+	}
+}
+
+func TestDoAPIAuthHealCarriesSetCookies(t *testing.T) {
+	// 412 自愈场景:WAF 下发的 Set-Cookie 应在重试前入 jar——
+	// mergeSetCookies 必须先于 401/412 状态分发执行,
+	// heal 通过后的重试请求携带新 Cookie。
+	var n, heals atomic.Int64
+	var retryCookie string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n.Add(1) == 1 {
+			w.Header().Set("Set-Cookie", "__puus=refreshed; Path=/")
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
+		retryCookie = r.Header.Get("Cookie")
+		fmt.Fprint(w, `{"status":200,"code":0,"data":{"ok":true}}`)
+	}))
+	defer srv.Close()
+
+	s := newTestSession(srv.Client(), nil)
+	s.SetAuthHeal(func(ctx context.Context) bool {
+		heals.Add(1)
+		return true
+	})
+	data, err := s.DoAPI(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("412 带 Set-Cookie 自愈后应成功: %v", err)
+	}
+	if string(data) != `{"ok":true}` {
+		t.Errorf("data = %q, want %q", string(data), `{"ok":true}`)
+	}
+	if !strings.Contains(retryCookie, "__puus=refreshed") {
+		t.Errorf("自愈重试请求 Cookie = %q, 应含 412 响应下发的 __puus=refreshed", retryCookie)
+	}
+	if n.Load() != 2 || heals.Load() != 1 {
+		t.Errorf("请求数 = %d, 校验次数 = %d, want 2/1", n.Load(), heals.Load())
+	}
+}
