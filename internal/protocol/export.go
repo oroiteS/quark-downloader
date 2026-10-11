@@ -34,8 +34,10 @@ const quarkReferer = "https://pan.quark.cn/"
 
 // ExportLinks 把 items 按 f 格式拼成导出文本并整串返回。
 // cookieStr 为完整 Cookie 串(防盗链必填)。aria2/curl 多文件命令间
-// 以空行分隔、每条前置 mkdir -p(RelPath 无目录时省略);motrix 每文件
-// 五段标注、文件间 ────── 分隔线。items 为空或格式未知时返回错误。
+// 以空行分隔、每条前置 mkdir -p(RelPath 无目录时省略),-o 一律用
+// 完整 RelPath(含相对目录,与 mkdir 的目录一致,确保落盘位置正确);
+// motrix 每文件五段标注、文件间 ────── 分隔线。items 为空或格式
+// 未知时返回错误。
 func ExportLinks(items []ExportItem, cookieStr string, f ExportFormat) (string, error) {
 	if len(items) == 0 {
 		return "", errors.New("没有可导出的直链")
@@ -58,7 +60,7 @@ func ExportLinks(items []ExportItem, cookieStr string, f ExportFormat) (string, 
 		for i, it := range items {
 			cmds[i] = mkdirPrefix(it.RelPath) + fmt.Sprintf(
 				`aria2c -c -x 16 -s 16 %q -o %q -U %q --header="Cookie: %s" --header="Referer: %s"`,
-				it.URL, baseName(it.RelPath), UserAgent, cookieStr, quarkReferer)
+				it.URL, it.RelPath, UserAgent, cookieStr, quarkReferer)
 		}
 		return strings.Join(cmds, "\n\n"), nil
 	case ExportCurl:
@@ -66,7 +68,7 @@ func ExportLinks(items []ExportItem, cookieStr string, f ExportFormat) (string, 
 		for i, it := range items {
 			cmds[i] = mkdirPrefix(it.RelPath) + fmt.Sprintf(
 				`curl -L -C - %q -o %q -A %q -b %q -e %q`,
-				it.URL, baseName(it.RelPath), UserAgent, cookieStr, quarkReferer)
+				it.URL, it.RelPath, UserAgent, cookieStr, quarkReferer)
 		}
 		return strings.Join(cmds, "\n\n"), nil
 	case ExportMotrix:
@@ -89,12 +91,4 @@ func mkdirPrefix(relPath string) string {
 		return fmt.Sprintf("mkdir -p %q && ", relPath[:i])
 	}
 	return ""
-}
-
-// baseName 返回路径最后一段(文件名),按 / 切分,与平台无关。
-func baseName(relPath string) string {
-	if i := strings.LastIndex(relPath, "/"); i >= 0 {
-		return relPath[i+1:]
-	}
-	return relPath
 }

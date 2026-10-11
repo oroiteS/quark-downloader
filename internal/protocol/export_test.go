@@ -47,16 +47,17 @@ func TestExportPlainNamed(t *testing.T) {
 }
 
 // TestExportAria2Curl golden 断言 aria2 与 curl 命令行:
-// 有目录的文件前置 mkdir -p "电影" &&;aria2c 带 -c -x 16 -s 16、
-// --header="Cookie: <整串>" 与 --header="Referer: ...";
-// curl 带 -L -C -、-b <cookie>、-e <referer>;UA 用包内常量;
-// 多文件命令之间空行分隔;RelPath 分隔符统一 /。
+// 有目录的文件前置 mkdir -p "电影" &&,且 -o 用完整 RelPath
+// (含相对目录,如 "电影/流浪地球2.mkv"),确保落盘进 mkdir 的目录;
+// aria2c 带 -c -x 16 -s 16、--header="Cookie: <整串>" 与
+// --header="Referer: ...";curl 带 -L -C -、-b <cookie>、-e <referer>;
+// UA 用包内常量;多文件命令之间空行分隔;RelPath 分隔符统一 /。
 func TestExportAria2Curl(t *testing.T) {
 	got, err := ExportLinks(exportFixture, exportCookie, ExportAria2)
 	if err != nil {
 		t.Fatalf("aria2 导出失败: %v", err)
 	}
-	cmd1 := fmt.Sprintf(`mkdir -p "电影" && aria2c -c -x 16 -s 16 "https://dl-1.quark.cn/d/abc.mkv?auth_key=AK1" -o "流浪地球2.mkv" -U %q --header="Cookie: __pus=aa; __puus=bb" --header="Referer: https://pan.quark.cn/"`, UserAgent)
+	cmd1 := fmt.Sprintf(`mkdir -p "电影" && aria2c -c -x 16 -s 16 "https://dl-1.quark.cn/d/abc.mkv?auth_key=AK1" -o "电影/流浪地球2.mkv" -U %q --header="Cookie: __pus=aa; __puus=bb" --header="Referer: https://pan.quark.cn/"`, UserAgent)
 	cmd2 := fmt.Sprintf(`aria2c -c -x 16 -s 16 "https://dl-1.quark.cn/d/def.srt?auth_key=AK2" -o "字幕.srt" -U %q --header="Cookie: __pus=aa; __puus=bb" --header="Referer: https://pan.quark.cn/"`, UserAgent)
 	want := cmd1 + "\n\n" + cmd2
 	if got != want {
@@ -67,7 +68,7 @@ func TestExportAria2Curl(t *testing.T) {
 	if err != nil {
 		t.Fatalf("curl 导出失败: %v", err)
 	}
-	cmd1 = fmt.Sprintf(`mkdir -p "电影" && curl -L -C - "https://dl-1.quark.cn/d/abc.mkv?auth_key=AK1" -o "流浪地球2.mkv" -A %q -b "__pus=aa; __puus=bb" -e "https://pan.quark.cn/"`, UserAgent)
+	cmd1 = fmt.Sprintf(`mkdir -p "电影" && curl -L -C - "https://dl-1.quark.cn/d/abc.mkv?auth_key=AK1" -o "电影/流浪地球2.mkv" -A %q -b "__pus=aa; __puus=bb" -e "https://pan.quark.cn/"`, UserAgent)
 	cmd2 = fmt.Sprintf(`curl -L -C - "https://dl-1.quark.cn/d/def.srt?auth_key=AK2" -o "字幕.srt" -A %q -b "__pus=aa; __puus=bb" -e "https://pan.quark.cn/"`, UserAgent)
 	want = cmd1 + "\n\n" + cmd2
 	if got != want {
