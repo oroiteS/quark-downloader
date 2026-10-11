@@ -91,9 +91,15 @@ func (s *Session) ExchangeCookie(ctx context.Context, ticket string) (AccountInf
 	return info, nil
 }
 
-// exchangeGetJSON 发一个 GET 并按 §2.3 通用外壳判定响应,返回 data 原文:
+// exchangeGetJSON 发一个 GET 并按 pan 域外壳判定响应,返回 data 原文:
 // 节流 → 完整头模板(Accept 覆盖为 §2.5 步骤 1 的 text/html 形态)→
 // 指定客户端发送 → 合并 Set-Cookie → HTTP 200 且外壳成功才算通过。
+//
+// 注意:pan 域 account/info 的外壳是布尔 success 形态
+// {"success":true,"data":{...}}(2026-10-11 真机实测),
+// 与业务域的 {status:200,code:0} 外壳(§2.3,adjudicate)不同——
+// 若误用 adjudicate 会把合法响应判成"响应不是有效 JSON"导致步骤 1
+// 中止、__puus 拿不到。业务域接口仍走 adjudicate,勿动。
 func (s *Session) exchangeGetJSON(ctx context.Context, client *http.Client, url string) (json.RawMessage, error) {
 	status, raw, err := s.exchangeRequest(ctx, client, url, step1Accept)
 	if err != nil {
@@ -102,7 +108,31 @@ func (s *Session) exchangeGetJSON(ctx context.Context, client *http.Client, url 
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d: %s", status, url)
 	}
-	return adjudicate(status, raw)
+	var env struct {
+		Success bool            `json:"success"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, fmt.Errorf("pan 域外壳判定失败: 响应不是有效 JSON(HTTP %d): %s",
+			status, snippet120(raw))
+	}
+	if !env.Success {
+		if env.Message != "" {
+			return nil, fmt.Errorf("pan 域外壳 success=false: %s", env.Message)
+		}
+		return nil, fmt.Errorf("pan 域外壳 success=false: %s", snippet120(raw))
+	}
+	return env.Data, nil
+}
+
+// snippet120 截取响应体前 120 字节作错误摘要,超长以省略号收尾。
+func snippet120(raw []byte) string {
+	snippet := string(raw)
+	if len(snippet) > 120 {
+		snippet = snippet[:120] + "..."
+	}
+	return snippet
 }
 
 // exchangeGet 发一个只为收 Set-Cookie 的 GET(§2.5 步骤 2):

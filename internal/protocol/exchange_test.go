@@ -62,7 +62,9 @@ func fakeExchange(t *testing.T) http.Handler {
 			for _, c := range []string{"__pus", "__kp", "__kps", "__ktd", "__uid", "ctoken"} {
 				http.SetCookie(w, &http.Cookie{Name: c, Value: c + "-v"})
 			}
-			fmt.Fprint(w, `{"status":200,"code":0,"message":"ok",`+
+			// pan 域 account/info 外壳为 {success:true}(2026-10-11 真机实测),
+			// 与业务域 {status,code} 不同。
+			fmt.Fprint(w, `{"success":true,`+
 				`"data":{"nickname":"飞舞用户","avatarUri":"https://avatar.example/u.png"}}`)
 		case "/list":
 			// 步骤 2a:Cookie 整串应带上步骤 1 刚收到的 __pus。
@@ -140,8 +142,8 @@ func TestExchangeCookieNoPusStep2Fail(t *testing.T) {
 		mu.Unlock()
 		switch r.URL.Path {
 		case "/account/info":
-			// 200 + 外壳成功,但零 Set-Cookie:步骤 1 本身通过,却拿不到 __pus。
-			fmt.Fprint(w, `{"status":200,"code":0,"message":"ok",`+
+			// 200 + pan 域外壳成功,但零 Set-Cookie:步骤 1 本身通过,却拿不到 __pus。
+			fmt.Fprint(w, `{"success":true,`+
 				`"data":{"nickname":"无Cookie用户","avatarUri":""}}`)
 		case "/list":
 			w.WriteHeader(http.StatusInternalServerError)
@@ -193,7 +195,7 @@ func TestExchangeCookieStep2FailContinue(t *testing.T) {
 			for _, c := range []string{"__pus", "__kp", "__kps", "__ktd", "__uid", "ctoken"} {
 				http.SetCookie(w, &http.Cookie{Name: c, Value: c + "-v"})
 			}
-			fmt.Fprint(w, `{"status":200,"code":0,"message":"ok",`+
+			fmt.Fprint(w, `{"success":true,`+
 				`"data":{"nickname":"飞舞用户","avatarUri":"https://avatar.example/u.png"}}`)
 		case "/list":
 			w.WriteHeader(http.StatusInternalServerError)
@@ -255,5 +257,68 @@ func TestExchangeCookieFail(t *testing.T) {
 	}
 	if s.jar.Has("__pus") {
 		t.Error("失败路径下 jar 不应拿到 __pus")
+	}
+}
+
+// TestExchangeCookieStep1PanEnvelopeFalse:pan 域外壳 success=false
+// (真机实测步骤 1 外壳为 {success:...},与业务域 {status,code} 不同):
+// 步骤 1 应立即失败并携带服务端 message,不再发起步骤 2。
+func TestExchangeCookieStep1PanEnvelopeFalse(t *testing.T) {
+	var mu sync.Mutex
+	paths := make([]string, 0, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		if r.URL.Path != "/account/info" {
+			t.Errorf("success=false 时不应请求步骤 2,收到 %s", r.URL.Path)
+			return
+		}
+		fmt.Fprint(w, `{"success":false,"message":"登录态已失效","data":{}}`)
+	}))
+	defer srv.Close()
+
+	s := newExchangeSession(t, srv)
+	_, err := s.ExchangeCookie(context.Background(), "TICKET456")
+	if err == nil {
+		t.Fatal("pan 域外壳 success=false 时应报错")
+	}
+	for _, sub := range []string{"步骤 1", "登录态已失效"} {
+		if !strings.Contains(err.Error(), sub) {
+			t.Errorf("错误信息应含 %q,实际: %v", sub, err)
+		}
+	}
+	if len(paths) != 1 || paths[0] != "/account/info" {
+		t.Errorf("success=false 后不应继续步骤 2,实际请求 = %v", paths)
+	}
+	if s.jar.Has("__puus") {
+		t.Error("步骤 1 中止后 jar 不应含 __puus")
+	}
+}
+
+// TestExchangeCookieStep1PanEnvelopeNotJSON:步骤 1 返回非 JSON
+// (如被墙拦截页):应报"不是有效 JSON"并附 120 字节摘要,步骤 2 不发起。
+func TestExchangeCookieStep1PanEnvelopeNotJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/account/info" {
+			t.Errorf("非 JSON 时不应请求步骤 2,收到 %s", r.URL.Path)
+			return
+		}
+		fmt.Fprint(w, `<html><body>blocked by wall</body></html>`)
+	}))
+	defer srv.Close()
+
+	s := newExchangeSession(t, srv)
+	_, err := s.ExchangeCookie(context.Background(), "TICKET456")
+	if err == nil {
+		t.Fatal("步骤 1 返回非 JSON 时应报错")
+	}
+	for _, sub := range []string{"步骤 1", "不是有效 JSON", "blocked by wall"} {
+		if !strings.Contains(err.Error(), sub) {
+			t.Errorf("错误信息应含 %q,实际: %v", sub, err)
+		}
+	}
+	if s.jar.Has("__puus") {
+		t.Error("步骤 1 中止后 jar 不应含 __puus")
 	}
 }
