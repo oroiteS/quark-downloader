@@ -126,6 +126,108 @@ func TestExchangeCookieSuccess(t *testing.T) {
 	}
 }
 
+// TestExchangeCookieNoPusStep2Fail 覆盖失败明细组装路径(审查发现):
+// 步骤 1 回 200+外壳成功但不下发任何 Cookie(无 __pus),/list 回 500。
+// 规格「失败时输出各步骤失败明细」的唯一体现路径——错误须同时携带
+// 步骤 1 提示(缺少 __pus)与「步骤 2 明细」各 URL 失败详情,
+// 且 2a 失败记录后 2b/2c 仍被请求(尽力收全)。
+func TestExchangeCookieNoPusStep2Fail(t *testing.T) {
+	var mu sync.Mutex
+	paths := make([]string, 0, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/account/info":
+			// 200 + 外壳成功,但零 Set-Cookie:步骤 1 本身通过,却拿不到 __pus。
+			fmt.Fprint(w, `{"status":200,"code":0,"message":"ok",`+
+				`"data":{"nickname":"无Cookie用户","avatarUri":""}}`)
+		case "/list":
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/1/clouddrive/file/sort", "/1/clouddrive/member":
+			// 2b/2c 正常 200:证明 2a 失败后循环未中断。
+		default:
+			t.Errorf("exchange fake 收到意外路径 %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	s := newExchangeSession(t, srv)
+	info, err := s.ExchangeCookie(context.Background(), "TICKET456")
+	if err == nil {
+		t.Fatal("步骤 1 未下发 __pus 时应报错")
+	}
+	// 错误同时携带:步骤 1 提示(缺少 __pus)与步骤 2 明细(pan/list 500)。
+	for _, sub := range []string{"步骤 1", "__pus", "步骤 2 明细", "pan/list", "500"} {
+		if !strings.Contains(err.Error(), sub) {
+			t.Errorf("错误信息应含 %q,实际: %v", sub, err)
+		}
+	}
+	// 2a 失败记录后继续:2b/2c 仍被请求,四个请求按序到达。
+	want := []string{"/account/info", "/list", "/1/clouddrive/file/sort", "/1/clouddrive/member"}
+	if fmt.Sprint(paths) != fmt.Sprint(want) {
+		t.Errorf("请求到达顺序 = %v, want %v", paths, want)
+	}
+	// 步骤 1 外壳成功时账号信息仍应解析;jar 始终无 __pus。
+	if info.Nickname != "无Cookie用户" {
+		t.Errorf("Nickname = %q, want 无Cookie用户", info.Nickname)
+	}
+	if s.jar.Has("__pus") {
+		t.Error("服务端未下发 __pus,jar 不应含 __pus")
+	}
+}
+
+// TestExchangeCookieStep2FailContinue:「单个步骤 2 失败记录后继续」变体:
+// 步骤 1 正常下发 __pus(成功判据已满足),仅 /list 回 500——
+// 2b/2c 仍被尽力请求,整体按规格判据(jar 含 __pus)返回成功。
+func TestExchangeCookieStep2FailContinue(t *testing.T) {
+	var mu sync.Mutex
+	paths := make([]string, 0, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/account/info":
+			for _, c := range []string{"__pus", "__kp", "__kps", "__ktd", "__uid", "ctoken"} {
+				http.SetCookie(w, &http.Cookie{Name: c, Value: c + "-v"})
+			}
+			fmt.Fprint(w, `{"status":200,"code":0,"message":"ok",`+
+				`"data":{"nickname":"飞舞用户","avatarUri":"https://avatar.example/u.png"}}`)
+		case "/list":
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/1/clouddrive/file/sort":
+			http.SetCookie(w, &http.Cookie{Name: "sort_c", Value: "sv"})
+			fmt.Fprint(w, `{"status":200,"code":0,"data":{}}`)
+		case "/1/clouddrive/member":
+			http.SetCookie(w, &http.Cookie{Name: "member_c", Value: "mv"})
+			fmt.Fprint(w, `{"status":200,"code":0,"data":{}}`)
+		default:
+			t.Errorf("exchange fake 收到意外路径 %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	s := newExchangeSession(t, srv)
+	info, err := s.ExchangeCookie(context.Background(), "TICKET456")
+	// 成功判据仅 jar 含 __pus(§2.5 逐字):单个步骤 2 失败不影响判定,
+	// 但 2b/2c 仍须继续请求以尽力收全 Cookie。
+	if err != nil {
+		t.Fatalf("步骤 2a 失败但 __pus 已下发,应按判据返回成功,实际: %v", err)
+	}
+	want := []string{"/account/info", "/list", "/1/clouddrive/file/sort", "/1/clouddrive/member"}
+	if fmt.Sprint(paths) != fmt.Sprint(want) {
+		t.Errorf("2a 失败后应继续 2b/2c,请求到达顺序 = %v, want %v", paths, want)
+	}
+	if info.Nickname != "飞舞用户" {
+		t.Errorf("Nickname = %q, want 飞舞用户", info.Nickname)
+	}
+	if !s.jar.Has("__pus") {
+		t.Error("jar 应含步骤 1 下发的 __pus")
+	}
+}
+
 func TestExchangeCookieFail(t *testing.T) {
 	// 步骤 1 直接 500:应立即报含步骤明细的错误,不再发起步骤 2 的三个请求。
 	var n sync.Mutex
