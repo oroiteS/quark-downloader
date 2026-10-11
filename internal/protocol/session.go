@@ -115,9 +115,9 @@ func (s *Session) DoAPI(ctx context.Context, method, url string, body []byte) (j
 		}
 		req.Header = APIHeaders(s.jar.String(), url)
 		if len(body) > 0 {
-			// §2.3 头模板未含 Content-Type;有 body 时补表单类型,与
-			// 夸克 PC 客户端的表单 POST 习惯一致。
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			// §2.3 头模板未含 Content-Type;§2.8 所有 POST body 均为
+			// JSON,有 body 时补 application/json,与真实客户端头一致。
+			req.Header.Set("Content-Type", "application/json")
 		}
 
 		resp, err := s.client.Do(req)

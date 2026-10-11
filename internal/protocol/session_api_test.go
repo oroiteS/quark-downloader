@@ -69,21 +69,21 @@ func TestDoAPISuccess(t *testing.T) {
 		t.Errorf("请求数 = %d, want 1", n.Load())
 	}
 
-	// POST:body 原样透传,带表单 Content-Type。
+	// POST:JSON body 原样透传,Content-Type 为 application/json(§2.8)。
 	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, _ := io.ReadAll(r.Body)
-		if string(got) != "pdir_fid=abc&file_fid=def" {
+		if string(got) != `{"pdir_fid":"abc","file_fid":"def"}` {
 			t.Errorf("POST body = %q, want 原样透传", got)
 		}
-		if ct := r.Header.Get("Content-Type"); ct != "application/x-www-form-urlencoded" {
-			t.Errorf("Content-Type = %q, want application/x-www-form-urlencoded", ct)
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", ct)
 		}
 		fmt.Fprint(w, `{"status":200,"code":0,"data":{"task_id":"tk"}}`)
 	}))
 	defer srv2.Close()
 
 	s2 := newTestSession(srv2.Client(), NewCookieJar())
-	data, err = s2.DoAPI(context.Background(), http.MethodPost, srv2.URL+"/task", []byte("pdir_fid=abc&file_fid=def"))
+	data, err = s2.DoAPI(context.Background(), http.MethodPost, srv2.URL+"/task", []byte(`{"pdir_fid":"abc","file_fid":"def"}`))
 	if err != nil {
 		t.Fatalf("POST DoAPI: %v", err)
 	}
