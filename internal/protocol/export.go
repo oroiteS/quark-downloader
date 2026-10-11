@@ -36,7 +36,8 @@ const quarkReferer = "https://pan.quark.cn/"
 // cookieStr 为完整 Cookie 串(防盗链必填)。aria2/curl 多文件命令间
 // 以空行分隔、每条前置 mkdir -p(RelPath 无目录时省略),-o 一律用
 // 完整 RelPath(含相对目录,与 mkdir 的目录一致,确保落盘位置正确);
-// motrix 每文件五段标注、文件间 ────── 分隔线。items 为空或格式
+// motrix 每文件五段标注、文件间 ────── 分隔线,【文件名】取 RelPath
+// 最后一个 / 之后的裸文件名(不含相对目录)。items 为空或格式
 // 未知时返回错误。
 func ExportLinks(items []ExportItem, cookieStr string, f ExportFormat) (string, error) {
 	if len(items) == 0 {
@@ -74,9 +75,16 @@ func ExportLinks(items []ExportItem, cookieStr string, f ExportFormat) (string, 
 	case ExportMotrix:
 		blocks := make([]string, len(items))
 		for i, it := range items {
+			// Motrix 表单的【文件名】是 Motrix 内部的任务名,
+			// 只认裸文件名(用户认可样例:来源 电影/阿凡达.mkv → 阿凡达.mkv),
+			// 与 aria2/curl 的 -o 用完整 RelPath 不同。
+			name := it.RelPath
+			if j := strings.LastIndex(name, "/"); j >= 0 {
+				name = name[j+1:]
+			}
 			blocks[i] = fmt.Sprintf(
 				"【文件名】%s\n【链接】%s\n【Referer】%s\n【Cookie】%s ★必填，不填会 412\n【User-Agent】%s 可留空",
-				it.RelPath, it.URL, quarkReferer, cookieStr, UserAgent)
+				name, it.URL, quarkReferer, cookieStr, UserAgent)
 		}
 		return strings.Join(blocks, "\n──────\n"), nil
 	default:

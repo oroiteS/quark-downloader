@@ -78,13 +78,14 @@ func TestExportAria2Curl(t *testing.T) {
 
 // TestExportMotrix golden 断言 Motrix 分段格式:
 // 每文件五段标签【文件名】【链接】【Referer】【Cookie】【User-Agent】齐全;
+// 【文件名】为裸文件名(RelPath 最后一个 / 之后的部分,不含相对目录);
 // Cookie 值后带 ★必填标注;文件间 ────── 分隔线,数量=文件数-1。
 func TestExportMotrix(t *testing.T) {
 	got, err := ExportLinks(exportFixture, exportCookie, ExportMotrix)
 	if err != nil {
 		t.Fatalf("motrix 导出失败: %v", err)
 	}
-	block1 := `【文件名】电影/流浪地球2.mkv
+	block1 := `【文件名】流浪地球2.mkv
 【链接】https://dl-1.quark.cn/d/abc.mkv?auth_key=AK1
 【Referer】https://pan.quark.cn/
 【Cookie】__pus=aa; __puus=bb ★必填，不填会 412
