@@ -328,6 +328,64 @@ func TestAuthHeal(t *testing.T) {
 	}
 }
 
+// TestAuthHeal403 验证 §2.3 状态表 403 行:"同上(触发快速校验 §2.6)"——
+// 403 与 401/412 同走鉴权自愈路径(退避 → heal → true 重试一次 / false 报
+// 登录失效)。直链场景 403=签名过期属引擎层语义(§2.10,本分支不实现),
+// 此处只按状态表验证会话层通用自愈。
+func TestAuthHeal403(t *testing.T) {
+	// 403 → heal true → 重试原请求一次 → 成功;共 2 次请求、1 次校验。
+	var n, heals atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n.Add(1) == 1 {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		fmt.Fprint(w, `{"status":200,"code":0,"data":{"healed":true}}`)
+	}))
+	defer srv.Close()
+
+	s := newTestSession(srv.Client(), nil)
+	s.SetAuthHeal(func(ctx context.Context) bool {
+		heals.Add(1)
+		return true
+	})
+	data, err := s.DoAPI(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("403 自愈后应成功: %v", err)
+	}
+	if string(data) != `{"healed":true}` {
+		t.Errorf("data = %q, want %q", data, `{"healed":true}`)
+	}
+	if n.Load() != 2 || heals.Load() != 1 {
+		t.Errorf("请求数 = %d, 校验次数 = %d, want 2/1", n.Load(), heals.Load())
+	}
+
+	// 403 → heal false → 报登录失效,不再重试。
+	var n2 atomic.Int64
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n2.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv2.Close()
+
+	s2 := newTestSession(srv2.Client(), nil)
+	s2.SetAuthHeal(func(ctx context.Context) bool { return false })
+	_, err = s2.DoAPI(context.Background(), http.MethodGet, srv2.URL+"/x", nil)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("错误应为 *APIError,实际 %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusForbidden {
+		t.Errorf("StatusCode = %d, want 403", apiErr.StatusCode)
+	}
+	if !strings.Contains(apiErr.Message, "登录") {
+		t.Errorf("heal 失败应报登录失效错误,实际 %q", apiErr.Message)
+	}
+	if n2.Load() != 1 {
+		t.Errorf("请求数 = %d, want 1(heal 失败不重试)", n2.Load())
+	}
+}
+
 func TestDoAPIMergeSetCookiesOnRetry(t *testing.T) {
 	// §2.3 规则 2:每次响应的 Set-Cookie 增量合并回 Cookie 串,同名覆盖。
 	// 第 1 次:500 + Set-Cookie: st=v1 → 退避重试;

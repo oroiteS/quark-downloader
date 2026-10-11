@@ -111,7 +111,7 @@ func NewSession(httpClient *http.Client, jar *CookieJar) *Session {
 	}
 }
 
-// SetAuthHeal 注册鉴权自愈回调(§2.3):DoAPI 遇 401/412 时退避 2–4s 后
+// SetAuthHeal 注册鉴权自愈回调(§2.3):DoAPI 遇 401/403/412 时退避 2–4s 后
 // 调用 fn 做快速登录校验,返回 true(Cookie 仍有效)则重试原请求一次。
 // 应在发起请求前设置;与 DoAPI 并发调用不安全。
 func (s *Session) SetAuthHeal(fn func(ctx context.Context) bool) {
@@ -122,7 +122,7 @@ func (s *Session) SetAuthHeal(fn func(ctx context.Context) bool) {
 // 节流 → 完整头模板构造请求 → 发送 → 合并 Set-Cookie → 按响应分类。
 //
 //   - 408/429/5xx/网络错误:按 BackoffDuration 指数退避重试,至多 3 次;
-//   - 401/412:走鉴权自愈(见 SetAuthHeal),自愈失败报登录失效;
+//   - 401/403/412:走鉴权自愈(见 SetAuthHeal),自愈失败报登录失效;
 //   - 其余:解析 JSON 外壳,status==200 && code==0 成功返回 data 字段原文
 //     (data 缺失时为 nil),否则返回映射后的 *APIError。
 //
@@ -167,9 +167,13 @@ func (s *Session) DoAPI(ctx context.Context, method, url string, body []byte) (j
 
 		status := resp.StatusCode
 
-		// 鉴权自愈:401/412 → 退避 2–4s → 快速校验 → Cookie 有效则重试原请求一次
-		// (偶发风控不该被误判为掉登录)。
-		if status == http.StatusUnauthorized || status == http.StatusPreconditionFailed {
+		// 鉴权自愈:401/403/412 → 退避 2–4s → 快速校验 → Cookie 有效则重试
+		// 原请求一次(偶发风控不该被误判为掉登录)。§2.3 状态表 403 行为
+		// "同上(触发快速校验 §2.6)",故 403 与 401/412 同路径;直链场景下
+		// 403=签名过期的自愈刷新属引擎层语义(§2.10,本分支不实现),
+		// 会话层只做这里的通用登录态自愈。
+		if status == http.StatusUnauthorized || status == http.StatusForbidden ||
+			status == http.StatusPreconditionFailed {
 			resp.Body.Close()
 			if !healed && s.authHeal != nil {
 				healed = true

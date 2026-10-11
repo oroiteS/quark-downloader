@@ -67,12 +67,13 @@ func (s *Session) QuickCheck(ctx context.Context) (bool, AccountInfo, error) {
 
 // probeFileSort 是 §2.6 的业务域兜底:wall 域 account/info 失败后,
 // 经业务客户端(drive-pc 域无指纹墙)GET file/sort——URL 与保活心跳
-// (keepalivePing)同形态。兜底 401/412 → false(登录已失效);
-// 其余一切结果(成功、网络失败、超时、其它状态码)→ 保守 true。
-// 成功也拿不到账号信息(file/sort 响应无账号数据),故不返回 info。
+// (keepalivePing)同形态,query 必带 pr=ucpro&fr=pc(§2.8)。
+// 兜底 401/412 → false(登录已失效);其余一切结果(成功、网络失败、
+// 超时、其它状态码)→ 保守 true。成功也拿不到账号信息(file/sort
+// 响应无账号数据),故不返回 info。
 func (s *Session) probeFileSort(ctx context.Context) bool {
 	status, _, err := s.exchangeRequest(ctx, s.client,
-		s.base.drivePC+"/1/clouddrive/file/sort?pdir_fid=0&_page=1&_size=1", "")
+		s.base.drivePC+"/1/clouddrive/file/sort?pr=ucpro&fr=pc&uc_param_str=&pdir_fid=0&_page=1&_size=1", "")
 	if err != nil {
 		return true // 网络失败:保守视为仍有效
 	}
@@ -81,7 +82,7 @@ func (s *Session) probeFileSort(ctx context.Context) bool {
 
 // StartKeepalive 启动保活心跳 goroutine(§2.6):首次延迟周期×(0.5~1.0)
 // ——随机相位,避免固定节奏;之后每周期 GET 一次
-// file/sort?pdir_fid=0&_page=1&_size=1。连续 2 次失败(单次失败可能只是
+// file/sort(形态见 keepalivePing)。连续 2 次失败(单次失败可能只是
 // 网络抖动)才判定登录过期:调用 onExpire 一次后心跳停止;
 // 任一次成功即清零失败计数。ctx 取消即停;onExpire 在心跳 goroutine
 // 中被调用,应为非阻塞回调。周期默认 5min(keepalivePeriod),测试注入
@@ -113,6 +114,12 @@ func (s *Session) StartKeepalive(ctx context.Context, onExpire func()) {
 			if s.keepalivePing(ctx) {
 				strikes = 0
 			} else {
+				// ctx 已取消时不计失败:取消后的 ping 必然失败(请求
+				// 被 context 打断),若记作第二振会把主动停止心跳伪装成
+				// 登录过期、误触 onExpire。先查取消再计数。
+				if ctx.Err() != nil {
+					return
+				}
 				strikes++
 				if strikes >= maxStrikes {
 					onExpire()
@@ -129,10 +136,11 @@ func (s *Session) StartKeepalive(ctx context.Context, onExpire func()) {
 }
 
 // keepalivePing 发一次保活心跳(§2.6):经业务客户端(drive-pc 域无指纹墙)
-// GET file/sort?pdir_fid=0&_page=1&_size=1,HTTP 200 即成功;
-// Set-Cookie 由 exchangeRequest 顺带合并回整串——心跳同时是 Cookie 保鲜手段。
+// GET file/sort(pdir_fid=0&_page=1&_size=1,query 必带 pr=ucpro&fr=pc,
+// §2.8),HTTP 200 即成功;Set-Cookie 由 exchangeRequest 顺带合并回整串
+// ——心跳同时是 Cookie 保鲜手段。
 func (s *Session) keepalivePing(ctx context.Context) bool {
 	status, _, err := s.exchangeRequest(ctx, s.client,
-		s.base.drivePC+"/1/clouddrive/file/sort?pdir_fid=0&_page=1&_size=1", "")
+		s.base.drivePC+"/1/clouddrive/file/sort?pr=ucpro&fr=pc&uc_param_str=&pdir_fid=0&_page=1&_size=1", "")
 	return err == nil && status == http.StatusOK
 }

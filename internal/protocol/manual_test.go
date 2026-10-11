@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -201,6 +203,8 @@ func TestManualLoginAndParse(t *testing.T) {
 	}
 
 	// 8. Motrix 导出:Cookie 串必填(防盗链 412),取 jar 整串。
+	// 完整导出文本含明文 Cookie,只写入临时文件(路径进日志),
+	// 终端回显一律走 manualMaskSensitive 打码版。
 	items := make([]ExportItem, 0, len(results))
 	for _, r := range results {
 		items = append(items, ExportItem{RelPath: r.FileName, URL: r.URL})
@@ -209,7 +213,50 @@ func TestManualLoginAndParse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExportLinks(motrix) 失败: %v", err)
 	}
-	t.Logf("Motrix 导出（%d 条）:\n%s", len(items), exported)
+	exportPath := filepath.Join(os.TempDir(), "feiwu-links-export.txt")
+	if err := os.WriteFile(exportPath, []byte(exported), 0o644); err != nil {
+		t.Fatalf("写导出文件 %s 失败: %v", exportPath, err)
+	}
+	t.Logf("Motrix 导出（%d 条）完整文本已写入: %s", len(items), exportPath)
+	t.Logf("Motrix 导出（%d 条，Cookie 打码版）:\n%s", len(items),
+		manualMaskSensitive(exported))
+}
+
+// manualSensitiveRe 匹配登录态核心 Cookie 的 k=v 形态(§2.2:__puus/__pus
+// 是登录核心,值不可进任何日志);值终止于 Cookie 串/JSON/CSV 的常见边界。
+var manualSensitiveRe = regexp.MustCompile(`(__puus|__pus)=[^;"',\s]+`)
+
+// manualMaskSensitive 把文本中出现的 __puus/__pus 值替换为 ***,
+// 其余内容(其它 Cookie 字段、URL、文件名等)原样保留。用于手动用例的
+// 终端回显:完整明文只落临时文件,日志永不携带登录凭证。
+func manualMaskSensitive(text string) string {
+	return manualSensitiveRe.ReplaceAllString(text, "$1=***")
+}
+
+// TestManualMaskSensitive 验证打码契约:__puus/__pus 的值必被替换,
+// 其余字段保留;打码幂等(已打码形态不再变化)。不依赖真机环境,
+// -tags manual 编译后即可运行。
+func TestManualMaskSensitive(t *testing.T) {
+	cookie := "ctoken=abc; __puus=SECRETVALUE; __pus=S2; _UP_A=keep"
+	want := "ctoken=abc; __puus=***; __pus=***; _UP_A=keep"
+	if got := manualMaskSensitive(cookie); got != want {
+		t.Errorf("Cookie 串打码 = %q, want %q", got, want)
+	}
+
+	// JSON 导出文本:cookie 字段内的敏感值打码,url 等其余字段原样。
+	jsonText := `{"cookie":"__puus=SECRETVALUE; ctoken=abc","url":"https://d.example/f.mp4?Expires=1"}`
+	wantJSON := `{"cookie":"__puus=***; ctoken=abc","url":"https://d.example/f.mp4?Expires=1"}`
+	if got := manualMaskSensitive(jsonText); got != wantJSON {
+		t.Errorf("JSON 打码 = %q, want %q", got, wantJSON)
+	}
+
+	// 幂等:二次打码不再变化,且原值绝不残留。
+	if got := manualMaskSensitive(manualMaskSensitive(cookie)); strings.Contains(got, "SECRETVALUE") {
+		t.Errorf("二次打码后原值仍残留: %q", got)
+	}
+	if strings.Contains(manualMaskSensitive(cookie+" __puus=***"), "SECRETVALUE") {
+		t.Error("已打码片段不应复活原值")
+	}
 }
 
 // manualStateName 返回扫码状态的日志名(带语义注记)。

@@ -114,8 +114,11 @@ func TestQuickCheckFileSortFallback(t *testing.T) {
 				t.Errorf("file/sort HTTP %d: 兜底路径 = %q, want /1/clouddrive/file/sort", status, r.URL.Path)
 			}
 			q := r.URL.Query()
+			if q.Get("pr") != "ucpro" || q.Get("fr") != "pc" {
+				t.Errorf("file/sort HTTP %d: 兜底查询串 = %q, 必带 pr=ucpro&fr=pc(§2.8)", status, r.URL.RawQuery)
+			}
 			if q.Get("pdir_fid") != "0" || q.Get("_page") != "1" || q.Get("_size") != "1" {
-				t.Errorf("file/sort HTTP %d: 兜底查询串 = %q, want pdir_fid=0&_page=1&_size=1", status, r.URL.RawQuery)
+				t.Errorf("file/sort HTTP %d: 兜底查询串 = %q, want pr=ucpro&fr=pc&uc_param_str=&pdir_fid=0&_page=1&_size=1", status, r.URL.RawQuery)
 			}
 			w.WriteHeader(status)
 		}))
@@ -207,8 +210,11 @@ func TestKeepaliveTwoStrikes(t *testing.T) {
 			t.Errorf("心跳路径 = %q, want /1/clouddrive/file/sort", r.URL.Path)
 		}
 		q := r.URL.Query()
+		if q.Get("pr") != "ucpro" || q.Get("fr") != "pc" {
+			t.Errorf("心跳查询串 = %q, 必带 pr=ucpro&fr=pc(§2.8)", r.URL.RawQuery)
+		}
 		if q.Get("pdir_fid") != "0" || q.Get("_page") != "1" || q.Get("_size") != "1" {
-			t.Errorf("心跳查询串 = %q, want pdir_fid=0&_page=1&_size=1", r.URL.RawQuery)
+			t.Errorf("心跳查询串 = %q, want pr=ucpro&fr=pc&uc_param_str=&pdir_fid=0&_page=1&_size=1", r.URL.RawQuery)
 		}
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -237,6 +243,56 @@ func TestKeepaliveTwoStrikes(t *testing.T) {
 	case <-expired:
 		t.Error("onExpire 应只被调用一次")
 	default:
+	}
+}
+
+// TestKeepaliveCancelNotExpire 验证取消竞态修复:strike 1(第一次真实失败)
+// 之后,下一次 ping 在途时 ctx 被取消——ping 必因取消失败,但取消不是
+// 登录过期,不该被计为第二振误触 onExpire。构造:首个请求真实 500,
+// 第二个请求在 handler 内挂起制造在途窗口,等到它在途后 cancel。
+func TestKeepaliveCancelNotExpire(t *testing.T) {
+	var n atomic.Int64
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n.Add(1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError) // 真实失败 → strike 1
+			return
+		}
+		<-release // 后续请求挂起:制造 ping 在途窗口
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	s := newTestSession(srv.Client(), NewCookieJar())
+	s.base = sessionBase{pan: srv.URL, drivePC: srv.URL, drive: srv.URL}
+	s.keepalivePeriod = 15 * time.Millisecond
+
+	var expired atomic.Bool
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.StartKeepalive(ctx, func() { expired.Store(true) })
+
+	// 等第二个请求已发出且在途(n==2,handler 正挂起)——此刻 cancel,
+	// 在途 ping 必以 context canceled 失败,当前实现会把它计为 strike 2。
+	deadline := time.Now().Add(5 * time.Second)
+	for n.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if n.Load() < 2 {
+		t.Fatal("5s 内第二个心跳未发出,无法构造在途取消窗口")
+	}
+	cancel()
+	close(release) // 放行挂起的 handler,避免拖住 srv.Close
+
+	// 等待远超多个周期:若误触 onExpire,expired 会被置位。
+	time.Sleep(300 * time.Millisecond)
+	if expired.Load() {
+		t.Error("ctx 取消导致的 ping 失败不应计为第二振,onExpire 被误触发")
+	}
+	settled := n.Load()
+	time.Sleep(120 * time.Millisecond)
+	if got := n.Load(); got != settled {
+		t.Errorf("取消后请求数仍增长: %d → %d,心跳 goroutine 应已退出", settled, got)
 	}
 }
 
