@@ -8,6 +8,8 @@ package webapi
 import (
 	"encoding/json"
 	"sync"
+
+	"quark-downloader/internal/engine"
 )
 
 // Event 是 SSE 事件帧的应用形态，JSON 序列化即 data: 行载荷。
@@ -99,4 +101,80 @@ func (h *Hub) subscriberCount() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.subs)
+}
+
+// ---- 引擎事件转发与登录态事件（Task 12，G3/G12）----
+
+// progressPayload task_progress 帧载荷（字段与 GET /api/tasks 的 DTO
+// 同形：done/speed_bps/state——前端一套渲染逻辑通用）。
+type progressPayload struct {
+	Done     int64   `json:"done"`
+	Total    int64   `json:"total"`
+	SpeedBPS float64 `json:"speed_bps"`
+	EtaMS    int64   `json:"eta_ms"`
+	State    string  `json:"state"`
+	Merging  bool    `json:"merging"`
+}
+
+// finalPayload task_final 帧载荷：终态 + 错误文本（Err 非 nil 时透出，
+// GET /api/tasks 的 error 字段无稳定来源——失败详情走此帧，Task 12）。
+type finalPayload struct {
+	State string `json:"state"`
+	Error string `json:"error,omitempty"`
+}
+
+// authPayload auth 帧载荷：登录态三事件 login/logout/expired。
+type authPayload struct {
+	Event    string `json:"event"`
+	LoggedIn bool   `json:"logged_in"`
+}
+
+// taskFinalStates 终态枚举（engine taskState 字符串面）：命中即 task_final。
+var taskFinalStates = map[string]bool{"done": true, "error": true, "canceled": true}
+
+// EngineEvent 引擎事件适配入口（装配：NewManager(cfg, app.EngineEvent)，
+// P4 Ruling——引擎 500ms 节流已在引擎层，此处纯转发不再节流）。
+// 进度/终态分流：终态三枚举（done/error/canceled）→ task_final（带 Err
+// 文本），其余 → task_progress。
+func (a *App) EngineEvent(ev engine.Event) {
+	if taskFinalStates[ev.Progress.State] {
+		payload, _ := json.Marshal(finalPayload{
+			State: ev.Progress.State,
+			Error: errMsg(ev.Err),
+		})
+		a.hub.Broadcast(Event{Type: "task_final", TaskID: ev.TaskID, Payload: payload})
+		return
+	}
+	payload, _ := json.Marshal(progressPayload{
+		Done: ev.Progress.Done, Total: ev.Progress.Total,
+		SpeedBPS: ev.Progress.SpeedBPS, EtaMS: etaMS(ev.Progress),
+		State: ev.Progress.State, Merging: ev.Progress.Merging,
+	})
+	a.hub.Broadcast(Event{Type: "task_progress", TaskID: ev.TaskID, Payload: payload})
+}
+
+// errMsg 终态错误文本（nil → 空串；用户取消为 ErrUserCancel 包装——
+// 文本如实透出，前端按 state=canceled 区分展示）。
+func errMsg(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// broadcastAuthEvent 登录态事件帧（login/logout/expired）。onExpire 只
+// 通知前端重新登录，会话清理留给用户操作（重新登录覆盖或 logout）。
+func (a *App) broadcastAuthEvent(event string, loggedIn bool) {
+	payload, _ := json.Marshal(authPayload{Event: event, LoggedIn: loggedIn})
+	a.hub.Broadcast(Event{Type: "auth", Payload: payload})
+}
+
+// tasksSnapshotJSON 全量任务快照的 JSON 载荷（hello 帧用；与 GET
+// /api/tasks 同源——tasks.go 的 tasksSnapshot 组装）。
+func (a *App) tasksSnapshotJSON() json.RawMessage {
+	b, err := json.Marshal(a.tasksSnapshot())
+	if err != nil {
+		return json.RawMessage("[]") // 不应发生：DTO 全可序列化
+	}
+	return json.RawMessage(b)
 }

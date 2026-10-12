@@ -97,40 +97,40 @@ const errDestBusyMark = "同一文件正在下载中"
 func (a *App) handleCreateTasks(c *gin.Context) {
 	var req createTasksRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_tasks_request",
+		writeError(c, http.StatusBadRequest, codeInvalidTasksRequest,
 			"请求体须为 {source, fids, pwd_id?, stoken?, passcode?, dest?, mode?} 的 JSON 对象")
 		return
 	}
 	if req.Source != "share" && req.Source != "drive" {
-		writeError(c, http.StatusBadRequest, "invalid_tasks_request", "source 须为 share 或 drive")
+		writeError(c, http.StatusBadRequest, codeInvalidTasksRequest, "source 须为 share 或 drive")
 		return
 	}
 	if len(req.FIDs) == 0 {
-		writeError(c, http.StatusBadRequest, "invalid_tasks_request", "fids 不能为空")
+		writeError(c, http.StatusBadRequest, codeInvalidTasksRequest, "fids 不能为空")
 		return
 	}
 	mode, err := parseTaskMode(req.Mode)
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_tasks_request", err.Error())
+		writeError(c, http.StatusBadRequest, codeInvalidTasksRequest, err.Error())
 		return
 	}
 	destPrefix, err := cleanDestPrefix(req.Dest)
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_tasks_request", err.Error())
+		writeError(c, http.StatusBadRequest, codeInvalidTasksRequest, err.Error())
 		return
 	}
 	if req.Source == "share" {
 		if req.PwdID == "" {
-			writeError(c, http.StatusBadRequest, "invalid_tasks_request", "share 模式须带 pwd_id")
+			writeError(c, http.StatusBadRequest, codeInvalidTasksRequest, "share 模式须带 pwd_id")
 			return
 		}
 		if req.Stoken == "" && req.Passcode == "" {
-			writeError(c, http.StatusBadRequest, "invalid_tasks_request", "share 模式须带 stoken 或 passcode（提取码）")
+			writeError(c, http.StatusBadRequest, codeInvalidTasksRequest, "share 模式须带 stoken 或 passcode（提取码）")
 			return
 		}
 	}
 	if a.manager == nil {
-		writeError(c, http.StatusInternalServerError, "internal", "下载管理器未装配")
+		writeError(c, http.StatusInternalServerError, codeInternal, "下载管理器未装配")
 		return
 	}
 
@@ -141,7 +141,7 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 	cookieStr := a.jar.String()
 	a.authMu.Unlock()
 	if sess == nil || !auth.LoginState() {
-		writeError(c, http.StatusUnauthorized, "not_logged_in", "未登录")
+		writeError(c, http.StatusUnauthorized, codeNotLoggedIn, "未登录")
 		return
 	}
 
@@ -150,7 +150,7 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 	if req.Source == "share" && stoken == "" {
 		st, err := sess.ShareToken(ctx, req.PwdID, req.Passcode)
 		if err != nil {
-			writeError(c, http.StatusBadGateway, "share_token_failed", "换取分享凭证失败: "+err.Error())
+			writeError(c, http.StatusBadGateway, codeShareTokenFailed, "换取分享凭证失败: "+err.Error())
 			return
 		}
 		stoken = st
@@ -159,7 +159,7 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 	// ① 目录递归展开（G11：后端负责，分页拉全在协议层）。
 	items, err := expandFIDs(ctx, sess, req.Source, req.PwdID, stoken, req.FIDs)
 	if err != nil {
-		writeError(c, http.StatusBadGateway, "expand_failed", "展开目录失败: "+err.Error())
+		writeError(c, http.StatusBadGateway, codeExpandFailed, "展开目录失败: "+err.Error())
 		return
 	}
 	if len(items) == 0 { // 全空目录：合法，空手而归
@@ -184,7 +184,7 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 	}
 	results, err := sess.DownloadLinks(ctx, linkReq)
 	if err != nil {
-		writeError(c, http.StatusBadGateway, "links_failed", "批量获取下载直链失败: "+err.Error())
+		writeError(c, http.StatusBadGateway, codeLinksFailed, "批量获取下载直链失败: "+err.Error())
 		return
 	}
 	byFID := make(map[string]protocol.LinkResult, len(results))
@@ -253,8 +253,14 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 			engine.SubmitOpt{Threads: budget[i], Refresher: a.makeRefresher(tc)})
 		if err != nil {
 			if errors.Is(err, engine.ErrClosed) {
-				writeError(c, http.StatusServiceUnavailable, "manager_closed",
+				writeError(c, http.StatusServiceUnavailable, codeManagerClosed,
 					fmt.Sprintf("下载管理器已关闭（已提交 %d 个任务，其余中断）: %v", len(taskIDs), err))
+				return
+			}
+			if errors.Is(err, engine.ErrInvalidThreads) {
+				// 参数错误整请求拒绝（Task 12 错误码冻结：400 不进
+				// skipped——档位来自 AllocateBudget 恒合法，此为防御接线）。
+				writeError(c, http.StatusBadRequest, codeInvalidThreads, err.Error())
 				return
 			}
 			reason := err.Error()
@@ -278,7 +284,7 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 		err := store.SaveTasks(a.paths, append(store.LoadTasks(a.paths), newCtxs...))
 		tasksFileMu.Unlock()
 		if err != nil {
-			writeError(c, http.StatusInternalServerError, "save_tasks_failed",
+			writeError(c, http.StatusInternalServerError, codeSaveTasksFailed,
 				fmt.Sprintf("已提交 %d 个任务但持久化任务上下文失败（重启后不自动续传）: %v", len(taskIDs), err))
 			return
 		}
@@ -463,12 +469,18 @@ type taskDTO struct {
 // 读者见旧或新完整文件）。引擎在册但 TaskCtx 缺失（落盘中断的边缘
 // 场景）不透出——无文件名/模式等上下文，且持久化已断需重新创建。
 func (a *App) handleListTasks(c *gin.Context) {
+	c.JSON(http.StatusOK, a.tasksSnapshot())
+}
+
+// tasksSnapshot 全量任务快照（GET /api/tasks 响应体；SSE hello 帧载荷
+// 同源——Task 12 断线对账与 REST 拉取一套数据两种投递）。
+func (a *App) tasksSnapshot() []taskDTO {
 	ctxs := store.LoadTasks(a.paths)
 	out := make([]taskDTO, 0, len(ctxs))
 	for _, tc := range ctxs {
 		out = append(out, a.taskDTOFromCtx(tc))
 	}
-	c.JSON(http.StatusOK, out)
+	return out
 }
 
 // taskDTOFromCtx 单条 TaskCtx → DTO。
@@ -540,7 +552,7 @@ func (a *App) handleTaskCancel(c *gin.Context) {
 // 任务是静默 no-op——响应 200 但下次列表即见真实状态（最终一致）。
 func (a *App) controlTask(c *gin.Context, fn func(id string)) {
 	if a.manager == nil {
-		writeError(c, http.StatusInternalServerError, "internal", "下载管理器未装配")
+		writeError(c, http.StatusInternalServerError, codeInternal, "下载管理器未装配")
 		return
 	}
 	id := c.Param("id")
@@ -550,11 +562,11 @@ func (a *App) controlTask(c *gin.Context, fn func(id string)) {
 		return
 	}
 	if ctxTaskExists(a.paths, id) {
-		writeError(c, http.StatusConflict, "needs_reparse",
+		writeError(c, http.StatusConflict, codeNeedsReparse,
 			"任务已不在下载引擎中（已淘汰或进程重启），需重新解析后重试")
 		return
 	}
-	writeError(c, http.StatusNotFound, "task_not_found", "任务不存在: "+id)
+	writeError(c, http.StatusNotFound, codeTaskNotFound, "任务不存在: "+id)
 }
 
 // handleTaskRetry 引擎在册→引擎 Retry（对运行中/排队中幂等无效，记
@@ -566,7 +578,7 @@ func (a *App) controlTask(c *gin.Context, fn func(id string)) {
 // needs_reparse 如实相告（G12 红线：绝不静默）。
 func (a *App) handleTaskRetry(c *gin.Context) {
 	if a.manager == nil {
-		writeError(c, http.StatusInternalServerError, "internal", "下载管理器未装配")
+		writeError(c, http.StatusInternalServerError, codeInternal, "下载管理器未装配")
 		return
 	}
 	id := c.Param("id")
@@ -585,12 +597,12 @@ func (a *App) handleTaskRetry(c *gin.Context) {
 		}
 	}
 	if idx < 0 {
-		writeError(c, http.StatusNotFound, "task_not_found", "任务不存在: "+id)
+		writeError(c, http.StatusNotFound, codeTaskNotFound, "任务不存在: "+id)
 		return
 	}
 	tc := ctxs[idx]
 	if !tc.CanRefresh() {
-		writeError(c, http.StatusConflict, "needs_reparse",
+		writeError(c, http.StatusConflict, codeNeedsReparse,
 			"任务上下文不足以重取直链（缺分享凭证），需重新解析分享")
 		return
 	}
@@ -601,14 +613,14 @@ func (a *App) handleTaskRetry(c *gin.Context) {
 	cookieStr := a.jar.String()
 	a.authMu.Unlock()
 	if sess == nil || !auth.LoginState() {
-		writeError(c, http.StatusUnauthorized, "not_logged_in", "未登录")
+		writeError(c, http.StatusUnauthorized, codeNotLoggedIn, "未登录")
 		return
 	}
 
 	refresher := a.makeRefresher(tc)
 	url, err := refresher(c.Request.Context())
 	if err != nil {
-		writeError(c, http.StatusConflict, "needs_reparse", "重取直链失败（需重新解析）: "+err.Error())
+		writeError(c, http.StatusConflict, codeNeedsReparse, "重取直链失败（需重新解析）: "+err.Error())
 		return
 	}
 	mode, _ := parseTaskMode(tc.Mode) // 空值→ModeA（与 modeLabel 缺省一致）
@@ -619,11 +631,13 @@ func (a *App) handleTaskRetry(c *gin.Context) {
 	if err != nil {
 		switch {
 		case errors.Is(err, engine.ErrClosed):
-			writeError(c, http.StatusServiceUnavailable, "manager_closed", "下载管理器已关闭: "+err.Error())
+			writeError(c, http.StatusServiceUnavailable, codeManagerClosed, "下载管理器已关闭: "+err.Error())
 		case errors.Is(err, engine.ErrDestBusy):
-			writeError(c, http.StatusConflict, "dest_busy", errDestBusyMark)
+			writeError(c, http.StatusConflict, codeDestBusy, errDestBusyMark)
+		case errors.Is(err, engine.ErrInvalidThreads): // Task 12 错误码冻结
+			writeError(c, http.StatusBadRequest, codeInvalidThreads, err.Error())
 		default:
-			writeError(c, http.StatusBadGateway, "submit_failed", "复活任务失败: "+err.Error())
+			writeError(c, http.StatusBadGateway, codeSubmitFailed, "复活任务失败: "+err.Error())
 		}
 		return
 	}
@@ -641,7 +655,7 @@ func (a *App) handleTaskRetry(c *gin.Context) {
 	err = store.SaveTasks(a.paths, cur)
 	tasksFileMu.Unlock()
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "save_tasks_failed",
+		writeError(c, http.StatusInternalServerError, codeSaveTasksFailed,
 			fmt.Sprintf("任务已复活（%s）但持久化任务上下文失败: %v", newID, err))
 		return
 	}

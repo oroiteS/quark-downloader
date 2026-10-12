@@ -63,23 +63,25 @@ func run(ctx context.Context, opts ...runOption) error {
 	settings := store.LoadSettings(paths) // 缺失/坏文件 → 默认，不挡启动
 	secrets := store.NewSecretStore(paths)
 	slog.Info("数据目录就绪", "dir", paths.DataDir)
-	// Manager 装配（Task 9）：DestDir/Threads/MaxConcurrentTasks 与
-	// settings 同源——webapi 的 TaskCtx.Dest 组装与预算分配
-	// （AllocateBudget 的 cap/concurrency）因此与引擎内部一致。
-	// onEvent 传 nil 是引擎文档化容忍（Task 12 接 hub.Broadcast）。
-	mgr := engine.NewManager(engine.Config{
-		Threads:            settings.Threads,
-		Mode:               engine.ModeA, // settings 无 mode 字段，缺省直写
-		MaxConcurrentTasks: settings.MaxConcurrentTasks,
-		DestDir:            settings.DestDir,
-	}, nil)
 
 	app := webapi.New(webapi.Deps{
 		Paths:    paths,
 		Settings: settings,
 		Secrets:  secrets,
-		Manager:  mgr,
 	})
+	// Manager 装配（Task 12，P4 Ruling）：先建 App（hub 就绪）→
+	// NewManager(cfg, app.EngineEvent)（引擎事件直连 hub 广播，500ms
+	// 节流在引擎层）→ SetManager（启动前一次性注入，无并发面）。
+	// DestDir/Threads/MaxConcurrentTasks 与 settings 同源——webapi 的
+	// TaskCtx.Dest 组装与预算分配（AllocateBudget 的 cap/concurrency）
+	// 因此与引擎内部一致。
+	mgr := engine.NewManager(engine.Config{
+		Threads:            settings.Threads,
+		Mode:               engine.ModeA, // settings 无 mode 字段，缺省直写
+		MaxConcurrentTasks: settings.MaxConcurrentTasks,
+		DestDir:            settings.DestDir,
+	}, app.EngineEvent)
+	app.SetManager(mgr)
 	handler := app.Router()
 
 	// 2) 启动钩子：restoreSession（Task 7）/restoreTasks（Task 11）——

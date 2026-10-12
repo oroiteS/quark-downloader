@@ -30,5 +30,8 @@ func (a *App) restoreSession(context.Context) error {
 		return nil
 	}
 	a.startKeepaliveLocked()
+	// 恢复成功也广播 login（Task 12）：语义一致性优先——启动早期多半
+	// 无订阅者，帧发了无人收，无害；前端若恰好已连 SSE 则即时获知。
+	a.broadcastAuthEvent("login", true)
 	return nil
 }

@@ -101,8 +101,8 @@ func TestRestoreCookieMissingPuusRollsBack(t *testing.T) {
 // ---- onExpire → SSE 登录态事件 ----
 
 // TestKeepaliveExpirePushesSSEAuthEvent 心跳判过期 → hub 广播 auth 事件 →
-// SSE 流收到 data: {"type":"auth","payload":{"logged_in":false}}（事件帧
-// 格式 Task 12 冻结, type 暂定 "auth" 走 Payload 扩展位）。
+// SSE 流收到 data: {"type":"auth","payload":{"event":"expired","logged_in":false}}
+// （帧格式 Task 12 已冻结：auth 帧 payload={event,logged_in}）。
 // fakeAuth 捕获 onExpire 后手动触发模拟两振过期（App 层驱动）。
 func TestKeepaliveExpirePushesSSEAuthEvent(t *testing.T) {
 	// 注入短心跳: 等到心跳注释行即证明 SSE handler 已完成订阅。
@@ -180,8 +180,10 @@ func TestKeepaliveExpirePushesSSEAuthEvent(t *testing.T) {
 	// 2) 触发 onExpire → SSE 流读到 auth 登录态事件帧。
 	onExpire()
 	want, err := json.Marshal(Event{
-		Type:    "auth",
-		Payload: json.RawMessage(`{"logged_in":false}`),
+		Type: "auth",
+		// Task 12 冻结契约：auth 帧 payload={event,logged_in}（旧帧
+		// 只有 logged_in——T12 起带 event 枚举 login/logout/expired）。
+		Payload: json.RawMessage(`{"event":"expired","logged_in":false}`),
 	})
 	if err != nil {
 		t.Fatalf("marshal 期望帧: %v", err)

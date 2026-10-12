@@ -7,7 +7,6 @@ package webapi
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"net/http"
 	"net/url"
 	"time"
@@ -132,10 +131,11 @@ func (a *App) startKeepaliveLocked() {
 	a.stopKeepaliveLocked()
 	ctx, cancel := context.WithCancel(context.Background())
 	a.keepaliveCancel = cancel
-	payload, _ := json.Marshal(map[string]bool{"logged_in": false})
 	auth := a.auth
 	auth.StartKeepalive(ctx, func() {
-		a.hub.Broadcast(Event{Type: "auth", Payload: payload})
+		// expired 帧（Task 12 登录态事件；logged_in=false——保活失败
+		// 即会话已失效，§2.6）。
+		a.broadcastAuthEvent("expired", false)
 	})
 }
 
@@ -157,20 +157,20 @@ func (a *App) handleQRStart(c *gin.Context) {
 
 	qr, err := a.auth.StartQRLogin(c.Request.Context())
 	if err != nil {
-		writeError(c, http.StatusBadGateway, "qr_start_failed",
+		writeError(c, http.StatusBadGateway, codeQRStartFailed,
 			"获取扫码 token 失败: "+err.Error())
 		return
 	}
 	scanURL := qr.ScanURL()
 	u, perr := url.Parse(scanURL)
 	if perr != nil || u.Query().Get("token") == "" {
-		writeError(c, http.StatusInternalServerError, "internal",
+		writeError(c, http.StatusInternalServerError, codeInternal,
 			"扫码页 URL 缺少 token: "+scanURL)
 		return
 	}
 	png, err := protocol.QRPNG(scanURL, qrPNGSize)
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "internal",
+		writeError(c, http.StatusInternalServerError, codeInternal,
 			"生成登录二维码失败: "+err.Error())
 		return
 	}
@@ -198,13 +198,13 @@ func (a *App) handleQRState(c *gin.Context) {
 	defer a.authMu.Unlock()
 
 	if a.qr == nil {
-		writeError(c, http.StatusBadRequest, "no_qr_session",
+		writeError(c, http.StatusBadRequest, codeNoQRSession,
 			"没有进行中的扫码登录会话，请先 POST /api/login/qr/start")
 		return
 	}
 	state, ticket, err := a.qr.Poll(c.Request.Context())
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "qr_poll_failed",
+		writeError(c, http.StatusBadRequest, codeQRPollFailed,
 			"扫码轮询失败: "+err.Error())
 		return
 	}
@@ -214,7 +214,7 @@ func (a *App) handleQRState(c *gin.Context) {
 		a.qr = nil // ticket 已消费，会话终结
 		info, err := a.auth.ExchangeCookie(c.Request.Context(), ticket)
 		if err != nil {
-			writeError(c, http.StatusInternalServerError, "exchange_failed",
+			writeError(c, http.StatusInternalServerError, codeExchangeFailed,
 				"换取登录 Cookie 失败: "+err.Error())
 			return
 		}
@@ -222,16 +222,17 @@ func (a *App) handleQRState(c *gin.Context) {
 			// 跨链判据统一（§2.6 __puus 唯一判据）：换 Cookie 协议成功
 			// 返回但 jar 缺 __puus（上游未下发登录态）时不给 logged_in——
 			// 与导入链/恢复链同一判据，杜绝"协议成功=已登录"的误判。
-			writeError(c, http.StatusInternalServerError, "exchange_failed",
+			writeError(c, http.StatusInternalServerError, codeExchangeFailed,
 				"换取的 Cookie 缺少 __puus（登录态 Cookie），请重新扫码登录")
 			return
 		}
 		if err := a.secrets.SaveCookie(a.jar.String()); err != nil {
-			writeError(c, http.StatusInternalServerError, "save_cookie_failed",
+			writeError(c, http.StatusInternalServerError, codeSaveCookieFailed,
 				"保存登录凭据失败: "+err.Error())
 			return
 		}
 		a.startKeepaliveLocked()
+		a.broadcastAuthEvent("login", true) // Task 12：登录成功广播 auth 帧
 		c.JSON(http.StatusOK, gin.H{
 			"state":     "got_ticket",
 			"logged_in": true,
@@ -280,13 +281,13 @@ func (a *App) handleCookieImport(c *gin.Context) {
 		Text string `json:"text"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_cookie",
+		writeError(c, http.StatusBadRequest, codeInvalidCookie,
 			`请求体须为 {"text":"<Cookie 文本>"} 的 JSON 对象`)
 		return
 	}
 	cookieStr, err := parseCookieText(req.Text)
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_cookie", err.Error())
+		writeError(c, http.StatusBadRequest, codeInvalidCookie, err.Error())
 		return
 	}
 
@@ -296,16 +297,17 @@ func (a *App) handleCookieImport(c *gin.Context) {
 	a.jar.LoadFromString(cookieStr)
 	if !a.auth.LoginState() {
 		a.resetSession() // 回滚脏 jar：导入失败不留半登录态
-		writeError(c, http.StatusBadRequest, "invalid_cookie",
+		writeError(c, http.StatusBadRequest, codeInvalidCookie,
 			"导入的 Cookie 缺少 __puus（登录态 Cookie），无法登录")
 		return
 	}
 	if err := a.secrets.SaveCookie(a.jar.String()); err != nil {
-		writeError(c, http.StatusInternalServerError, "save_cookie_failed",
+		writeError(c, http.StatusInternalServerError, codeSaveCookieFailed,
 			"保存登录凭据失败: "+err.Error())
 		return
 	}
 	a.startKeepaliveLocked()
+	a.broadcastAuthEvent("login", true) // Task 12：登录成功广播 auth 帧
 	c.JSON(http.StatusOK, gin.H{"logged_in": true})
 }
 
@@ -321,12 +323,13 @@ func (a *App) handleLogout(c *gin.Context) {
 
 	a.stopKeepaliveLocked()
 	if err := a.secrets.SaveCookie(""); err != nil {
-		writeError(c, http.StatusInternalServerError, "logout_failed",
+		writeError(c, http.StatusInternalServerError, codeLogoutFailed,
 			"清除登录凭据失败: "+err.Error())
 		return
 	}
 	a.qr = nil
 	a.resetSession()
+	a.broadcastAuthEvent("logout", false) // Task 12：登录态事件
 	c.JSON(http.StatusOK, gin.H{"logged_in": false})
 }
 
@@ -340,18 +343,18 @@ func (a *App) handleAccount(c *gin.Context) {
 	a.authMu.Unlock() // 网络调用不持锁；logout 并发重建时用本帧快照
 
 	if !auth.LoginState() {
-		writeError(c, http.StatusUnauthorized, "not_logged_in", "未登录")
+		writeError(c, http.StatusUnauthorized, codeNotLoggedIn, "未登录")
 		return
 	}
 	ok, info, _ := auth.QuickCheck(c.Request.Context())
 	if !ok {
-		writeError(c, http.StatusUnauthorized, "not_logged_in",
+		writeError(c, http.StatusUnauthorized, codeNotLoggedIn,
 			"登录已失效，请重新扫码登录")
 		return
 	}
 	total, used, err := auth.Capacity(c.Request.Context())
 	if err != nil {
-		writeError(c, http.StatusBadGateway, "capacity_failed",
+		writeError(c, http.StatusBadGateway, codeCapacityFailed,
 			"查询网盘容量失败: "+err.Error())
 		return
 	}

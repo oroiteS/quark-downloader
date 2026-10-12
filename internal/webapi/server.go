@@ -70,6 +70,12 @@ func New(deps Deps) *App {
 // Router 返回应用的 gin 引擎（健康检查、SSE、静态与后续 /api 端点）。
 func (a *App) Router() *gin.Engine { return a.router }
 
+// SetManager 启动期一次性注入任务管理器（Task 12 装配形态：main 先建
+// App（hub 就绪）→ NewManager(cfg, app.EngineEvent) → SetManager →
+// Start——engine 事件由此直连 hub 广播，P4 Ruling 落地）。仅限启动前
+// 调用：运行中替换无并发保护（生产装配与测试注入都不需要）。
+func (a *App) SetManager(m taskManager) { a.manager = m }
+
 // Start 启动钩子：恢复链入口（main 在监听前调用一次）。
 //
 //	restoreSession（session.go，D9：Cookie 恢复 + keepalive 启动）
@@ -109,7 +115,7 @@ func (a *App) Close() {
 func (a *App) buildRouter() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.CustomRecovery(func(c *gin.Context, _ any) {
-		writeError(c, http.StatusInternalServerError, "internal", "服务器内部错误")
+		writeError(c, http.StatusInternalServerError, codeInternal, "服务器内部错误")
 	}))
 
 	api := r.Group("/api")
@@ -139,7 +145,7 @@ func (a *App) buildRouter() *gin.Engine {
 		// /api（含 /api/ 前缀子路径）的未匹配路径保持 JSON 语义（客户端
 		// bug 或版本错配，回落 HTML 只会掩盖）；其余路径走 SPA fallback。
 		if p := c.Request.URL.Path; p == "/api" || strings.HasPrefix(p, "/api/") {
-			writeError(c, http.StatusNotFound, "not_found", "接口不存在: "+p)
+			writeError(c, http.StatusNotFound, codeNotFound, "接口不存在: "+p)
 			return
 		}
 		serveStatic(c)
@@ -173,6 +179,14 @@ func (a *App) handleEvents(c *gin.Context) {
 		flusher = nopFlusher{}
 	}
 	flusher.Flush() // 头先行，让客户端立刻拿到 Content-Type
+
+	// 断线对账（G3，Task 12）：订阅即发 hello 帧带全量任务快照（与
+	// GET /api/tasks 同源组装）——重连客户端首帧即恢复视图，不必先拉
+	// REST 对账（Focus #4；REST 拉取仍是等价兜底）。
+	if b, err := json.Marshal(Event{Type: "hello", Payload: a.tasksSnapshotJSON()}); err == nil {
+		fmt.Fprintf(c.Writer, "data: %s\n\n", b)
+		flusher.Flush()
+	}
 
 	ticker := time.NewTicker(sseHeartbeat)
 	defer ticker.Stop()
@@ -210,3 +224,35 @@ func writeError(c *gin.Context, status int, code, message string) {
 		"error": gin.H{"code": code, "message": message},
 	})
 }
+
+// ---- 冻结的错误码契约（Task 12，系列 4 前端依赖）----
+//
+// 常量值即 wire 契约：重命名/增删须同步前端（TestErrorCodeConstantsFrozen
+// 是唯一权威清单的护栏）。engine sentinel 映射：ErrInvalidThreads→
+// invalid_threads（400 参数错误）、ErrDestBusy→dest_busy（创建路径进
+// skipped 不升 HTTP 错误）、ErrClosed→manager_closed（503）。
+
+const (
+	codeNotLoggedIn         = "not_logged_in"         // 401 未登录（§2.6 __puus 判据）
+	codeInternal            = "internal"              // 500 内部错误（panic 兜底同码）
+	codeNotFound            = "not_found"             // 404 路由不存在
+	codeTaskNotFound        = "task_not_found"        // 404 任务双 miss（引擎+TaskCtx）
+	codeNeedsReparse        = "needs_reparse"         // 409 需重新解析（D9）
+	codeDestBusy            = "dest_busy"             // 409 同路径互斥（§3.13；创建链进 skipped）
+	codeSubmitFailed        = "submit_failed"         // 502 Submit 失败（非参数/互斥/关闭类）
+	codeInvalidThreads      = "invalid_threads"       // 400 并发档位非法（ErrInvalidThreads）
+	codeManagerClosed       = "manager_closed"        // 503 管理器关闭（ErrClosed）
+	codeInvalidTasksRequest = "invalid_tasks_request" // 400 创建请求参数错误
+	codeSaveTasksFailed     = "save_tasks_failed"     // 500 tasks.json 落盘失败
+	codeSaveCookieFailed    = "save_cookie_failed"    // 500 凭据保存失败
+	codeLogoutFailed        = "logout_failed"         // 500 登出清理失败
+	codeExchangeFailed      = "exchange_failed"       // 500 ticket 换 Cookie 失败
+	codeQRStartFailed       = "qr_start_failed"       // 502 发起扫码失败
+	codeQRPollFailed        = "qr_poll_failed"        // 500 轮询扫码状态失败
+	codeNoQRSession         = "no_qr_session"         // 400 无进行中的扫码会话
+	codeInvalidCookie       = "invalid_cookie"        // 400 Cookie 导入格式/内容非法
+	codeShareTokenFailed    = "share_token_failed"    // 502 换取分享凭证失败
+	codeLinksFailed         = "links_failed"          // 502 批量取直链失败
+	codeExpandFailed        = "expand_failed"         // 502 目录展开失败
+	codeCapacityFailed      = "capacity_failed"       // 502 网盘容量查询失败
+)

@@ -29,7 +29,7 @@ func registerStatic(r *gin.Engine) {
 func serveIndex(c *gin.Context) {
 	b, err := distFS.ReadFile(indexPath)
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "internal", "index.html 缺失")
+		writeError(c, http.StatusInternalServerError, codeInternal, "index.html 缺失")
 		return
 	}
 	c.Data(http.StatusOK, "text/html; charset=utf-8", b)
