@@ -1,0 +1,35 @@
+/* Dialog（skill Modal 模式）；遮罩 --color-scrim，色值/间距/圆角/阴影全 token。
+   z-index 为堆叠层级（非色值/间距），与 skill skip-link 同为字面量。 */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  background: var(--color-scrim);
+}
+
+.dialog {
+  /* 面板宽度上限属布局尺寸（非间距刻度），rem 相对根字号 */
+  max-width: 30rem;
+  background: var(--color-surface);
+  color: var(--color-on-surface);
+  font-family: var(--font-sans);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xl);
+  padding: var(--space-5);
+}
+
+/* 容器聚焦（无可聚焦子元素时的兜底入内）是程序性焦点而非键盘漫游，去描边 */
+.dialog:focus {
+  outline: none;
+}
+
+.dialog__title {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-xl);
+  line-height: var(--leading-tight);
+  color: var(--color-on-surface);
+}

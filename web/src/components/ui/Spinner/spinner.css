@@ -1,0 +1,23 @@
+/* Spinner：颜色/圆角/时长全走 tokens.css；尺寸用 em 随宿主字号缩放（非间距）。 */
+.spinner {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: var(--radius-full);
+  animation: spinner-rotate var(--transition-slow) linear infinite;
+}
+
+@keyframes spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 动效安全阀：偏好减弱动效时停转，仅保留静态指示 */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}

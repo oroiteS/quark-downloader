@@ -1,0 +1,62 @@
+/* Card（skill Card 模式）；色值/间距/圆角/阴影全走 tokens.css。
+   基类 border:none 是为 interactive 原生 button 清掉 UA 描边，
+   outlined 变体在其后按源序覆盖加回。 */
+.card {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  color: var(--color-on-surface);
+  text-align: start;
+  border: none;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+}
+
+.card--elevated {
+  box-shadow: var(--shadow-md);
+}
+
+.card--outlined {
+  border: 1px solid var(--color-border);
+}
+
+.card--filled {
+  background: var(--color-surface-variant);
+}
+
+.card--interactive {
+  cursor: pointer;
+  transition: transform var(--transition-base), box-shadow var(--transition-base);
+}
+
+.card--interactive:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+}
+
+.card--interactive:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* 动效安全阀：与 Spinner 同策略 */
+@media (prefers-reduced-motion: reduce) {
+  .card--interactive {
+    transition: none;
+  }
+}
+
+.card--padding-none {
+  padding: 0;
+}
+
+.card--padding-sm {
+  padding: var(--space-3);
+}
+
+.card--padding-md {
+  padding: var(--space-4);
+}
+
+.card--padding-lg {
+  padding: var(--space-6);
+}
