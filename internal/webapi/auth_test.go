@@ -849,3 +849,45 @@ func TestResetSessionStopsKeepalive(t *testing.T) {
 		t.Fatal("resetSession 后 keepaliveCancel 应归零")
 	}
 }
+
+// TestAccountNicknameFallsBackToCached 发现 B 修复（T14 真机暴露）：
+// QR 登录链拿到昵称后缓存；account 的 QuickCheck 走 wall 域兜底拿不到
+// info（零值）时昵称回退缓存——昵称不再空白。
+func TestAccountNicknameFallsBackToCached(t *testing.T) {
+	fa := &fakeAuth{startQR: &fakeQR{
+		scanURL: qrScanURL,
+		results: []qrResult{{state: protocol.QRGotTicket, ticket: "tk-nick"}},
+	}}
+	fa.exchangeF = func(string) (protocol.AccountInfo, error) {
+		fa.mu.Lock()
+		jar := fa.jar
+		fa.mu.Unlock()
+		jar.LoadFromString("__puus=tok")
+		return protocol.AccountInfo{Nickname: "扫码昵称"}, nil
+	}
+	// 真机场景：QuickCheck wall 域失败走 probeFileSort 兜底——ok 但零值 info。
+	fa.quickF = func() (bool, protocol.AccountInfo) { return true, protocol.AccountInfo{} }
+	fa.capF = func() (int64, int64, error) { return 100, 1, nil }
+	app := newAuthTestApp(t, fa, &fakeSecrets{})
+
+	if w := doReq(t, app.Router(), http.MethodPost, "/api/login/qr/start", nil); w.Code != 200 {
+		t.Fatalf("start 状态码 = %d", w.Code)
+	}
+	if w := doReq(t, app.Router(), http.MethodGet, "/api/login/qr/state", nil); w.Code != 200 {
+		t.Fatalf("state 状态码 = %d（body=%s）", w.Code, w.Body)
+	}
+
+	w := doReq(t, app.Router(), http.MethodGet, "/api/account", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("account 状态码 = %d（body=%s）", w.Code, w.Body)
+	}
+	var body struct {
+		Nickname string `json:"nickname"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if body.Nickname != "扫码昵称" {
+		t.Fatalf("nickname = %q, 期望回退缓存 \"扫码昵称\"（body=%s）", body.Nickname, w.Body)
+	}
+}

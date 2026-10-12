@@ -43,8 +43,9 @@ type App struct {
 	session         *protocol.Session // 业务会话（Task 9 直链等）；与 auth 同源
 	auth            authAPI           // 登录流操作面（sessionAuth 适配或测试 fake）
 	newAuthPair     func(jar *protocol.CookieJar) (*protocol.Session, authAPI)
-	qr              qrSession          // 进行中的扫码会话；nil = 无
-	keepaliveCancel context.CancelFunc // 保活心跳停止开关；nil = 未启动
+	qr              qrSession            // 进行中的扫码会话；nil = 无
+	keepaliveCancel context.CancelFunc   // 保活心跳停止开关；nil = 未启动
+	cachedAccount   protocol.AccountInfo // 登录链昵称/头像缓存（QuickCheck 兜底零值时 account 回退；authMu 保护）
 
 	hub    *Hub
 	router *gin.Engine

@@ -231,6 +231,7 @@ func (a *App) handleQRState(c *gin.Context) {
 				"保存登录凭据失败: "+err.Error())
 			return
 		}
+		a.cachedAccount = info // 昵称/头像缓存：account 的 QuickCheck 走兜底拿不到 info 时回退（T14 真机发现 B）
 		a.startKeepaliveLocked()
 		a.broadcastAuthEvent("login", true) // Task 12：登录成功广播 auth 帧
 		c.JSON(http.StatusOK, gin.H{
@@ -351,6 +352,16 @@ func (a *App) handleAccount(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, codeNotLoggedIn,
 			"登录已失效，请重新扫码登录")
 		return
+	}
+	// QuickCheck wall 域失败走 probeFileSort 兜底时 info 为零值（协议层
+	// 规格：兜底拿不到账号信息）——昵称/头像回退登录链缓存（T14 发现 B）。
+	if info.Nickname == "" && info.AvatarURI == "" {
+		a.authMu.Lock()
+		cached := a.cachedAccount
+		a.authMu.Unlock()
+		if cached.Nickname != "" {
+			info = cached
+		}
 	}
 	total, used, err := auth.Capacity(c.Request.Context())
 	if err != nil {
