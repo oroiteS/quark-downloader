@@ -106,6 +106,17 @@ type Task struct {
 	// ---- Task 11（§3.9 停滞看门狗）----
 	watchdog *Watchdog // 停滞看门狗（monitorA 每 sampleEvery 节拍 Tick；nil 防御：直接构造 Task 的路径）
 
+	// ---- Task 12（§3.5/§3.6 模式 B：独立分片 + 边合并）----
+	modeB       bool                             // 落盘模式 B：fetchOnce 写分片文件、verdict 复判目标文件长度
+	partsDir    string                           // 分片目录（runB 装配 = Dest+".qparts"；空 = 模式 A 直写 dest）
+	mergeEvery  time.Duration                    // 合并线程轮询周期（§3.5 逐字 100ms；测试注入）
+	mergeGrace  int                              // 收尾宽限轮数（worker 全退后等完成标记的额外轮数）
+	mergeNext   int                              // 合并起点：第一个未合并片（调用方装配 ReconcileB 的 mergedCount）
+	mergeInPart int64                            // 起始片已合并字节（ReconcileB 的 mergedInHead）
+	mergeDone   atomic.Int64                     // 合并线程累计搬运字节（合并吞吐数据源）
+	mergeSpeed  *Speedometer                     // 合并阶段速度计（Merging 帧 SpeedBPS）
+	freeSpace   func(dir string) (uint64, error) // 磁盘剩余空间查询（磁盘预检；注入化）
+
 	// ---- 钩子（nil 安全；Task 14 / 测试装配）----
 	onEvent       func(Progress) // 进度事件回调（监视线程节拍驱动）
 	onWorkerStart func(w int)    // worker 冷启动完成钩子（错峰观测）
@@ -142,6 +153,10 @@ func newTask(id, dest, url, cookieStr string, threads int, total int64) *Task {
 		qmetaEvery:   time.Second,            // §3.6
 		preemptEvery: preemptScanEvery,       // §3.7：5s
 		sleep:        sleepCtx,               // §3.10 片级重试退避等待
+		mergeEvery:   mergePollEvery,         // §3.5 模式 B：合并线程 100ms 轮询
+		mergeGrace:   mergeGraceRounds,       // 模式 B 收尾宽限 10 轮
+		mergeSpeed:   NewSpeedometer(),       // §3.9 合并阶段吞吐（Merging 帧）
+		freeSpace:    diskFreeSpace,          // 模式 B 磁盘预检（平台实现，注入化）
 	}
 	tk.preempt = newPreemptor(tk, n, len(segs)) // §3.7 采样表按 worker 编号（n 与 runA 同式）
 	tk.watchdog = newWatchdog(tk, stalledEvery) // §3.9 停滞阈值 45s（测试注入 tk.watchdog.threshold）
@@ -151,10 +166,16 @@ func newTask(id, dest, url, cookieStr string, threads int, total int64) *Task {
 // progress 返回当前进度快照。Done 与 State 原子读，SpeedBPS 内部有锁，
 // 三者非同一瞬时（快照语义，进度展示足够）。
 func (t *Task) progress() Progress {
+	bps := t.speed.BPS()
+	// §3.9 模式 B 收尾：合并阶段（worker 全结束）改报合并吞吐——done 已满，
+	// 下载速度计静止，继续报它会让「正在合并分片」帧显示 0 速。
+	if t.modeB && t.mergeSpeed != nil && t.watchdog != nil && t.watchdog.Merging() {
+		bps = t.mergeSpeed.BPS()
+	}
 	return Progress{
 		Done:     t.done.Load(),
 		Total:    t.Total,
-		SpeedBPS: t.speed.BPS(),
+		SpeedBPS: bps,
 		State:    taskState(t.state.Load()).String(),
 		Merging:  t.watchdog != nil && t.watchdog.Merging(), // §3.9 合并阶段状态位
 	}

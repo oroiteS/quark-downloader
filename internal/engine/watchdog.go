@@ -13,6 +13,7 @@ package engine
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"time"
 )
@@ -131,13 +132,13 @@ type Verdict struct {
 }
 
 // verdict 完整性终判（§3.11 逐字：报「失败」之前，先验证数据本身）。
-// 仅在 cancelled 或 errors 非空时由 runA 调用（成功路径无需终判）：
+// 仅在 cancelled 或 errors 非空时由 runA/runB 调用（成功路径无需终判）：
 //
 //	done ≥ total（模式 A）→ 按成功处理——错误计数只是过程指标，
 //	「存在过错误」≠「数据缺失」（987MB 事故，§3.11 依据原文）。
 //
-// 模式 B 扩展点（Task 12）：在判据处加「目标文件长度 == total」复判
-// （差一个字节都不算成功）——保持本函数签名不变，只扩 dataComplete。
+// 模式 B（Task 12 已落地）：判据在 dataComplete 扩为「目标文件长度 ==
+// total」复判（差一个字节都不算成功）。
 func (t *Task) verdict() Verdict {
 	done := t.done.Load()
 	if t.dataComplete() {
@@ -152,8 +153,18 @@ func (t *Task) verdict() Verdict {
 	return Verdict{Done: done, Total: t.Total}
 }
 
-// dataComplete 模式 A 数据完整性判据：done ≥ total（§3.11 逐字）。
-// 模式 B（Task 12）在此扩展为目标文件长度 == total 的复判。
+// dataComplete 数据完整性判据（§3.11）。模式 A 逐字：done ≥ total。
+// 模式 B（Task 12）：另加目标文件长度 == total 的复判——分片可能还躺在
+// 分片目录里没合并完（记账满 ≠ 文件满），差一个字节都不算成功（§3.11
+// 依据原文：模式 B 收尾还要再验一次，目标文件长度 ≠ total 差一个字节
+// 也不能当成功）。
 func (t *Task) dataComplete() bool {
-	return t.done.Load() >= t.Total
+	if t.done.Load() < t.Total {
+		return false
+	}
+	if !t.modeB {
+		return true
+	}
+	fi, err := os.Stat(t.Dest)
+	return err == nil && fi.Size() == t.Total
 }

@@ -385,27 +385,52 @@ func (t *Task) fetchOnce(sctx context.Context, idx int, buf []byte) error {
 		}
 	}
 
-	// 每片独立开流 → Seek(S+W) → 写 → 写完即关（§3.5：关闭即 flush，
-	// 「记账 = 盘上」，不给续传留「缓冲未落盘」陷阱；省几次 open 不值）。
-	f, err := os.OpenFile(t.Dest, os.O_WRONLY, 0)
-	if err != nil {
-		return fmt.Errorf("feiwu: 打开目标文件写片 %d 失败: %w", idx, err)
+	// 每片独立开流 → Seek → 写 → 写完即关（§3.5：关闭即 flush，「记账 =
+	// 盘上」，不给续传留「缓冲未落盘」陷阱；省几次 open 不值）。两模式只
+	// 分化落盘目标（§3.5 模式 B 1）：A 直写 dest、Seek(S+W)；B 写分片文件
+	// <dest>.qparts/p%06d、Seek(片内 W)——分片文件独立于目标偏移，worker
+	// 顺序追加写，盘上长度永远是合法前缀（合并线程增量搬运的依据）。
+	var f *os.File
+	if t.modeB {
+		f, err = os.OpenFile(partPath(t.partsDir, idx), os.O_WRONLY|os.O_CREATE, 0o644)
+		if err != nil {
+			return fmt.Errorf("feiwu: 打开分片文件 %d 失败: %w", idx, err)
+		}
+		_, err = f.Seek(w, io.SeekStart)
+	} else {
+		f, err = os.OpenFile(t.Dest, os.O_WRONLY, 0)
+		if err != nil {
+			return fmt.Errorf("feiwu: 打开目标文件写片 %d 失败: %w", idx, err)
+		}
+		_, err = f.Seek(s.Start+w, io.SeekStart)
 	}
-	defer f.Close()
-	if _, err := f.Seek(s.Start+w, io.SeekStart); err != nil {
-		return fmt.Errorf("feiwu: Seek 到 %d 失败: %w", s.Start+w, err)
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("feiwu: Seek 失败: %w", err)
 	}
 
 	remain := s.End - s.Start + 1 - w
 	cw := &segWriter{t: t, idx: idx, f: f} // 边写边记账（W/done 逐块递增）
-	written, err := io.CopyBuffer(cw, io.LimitReader(resp.Body, remain), buf)
-	if err != nil {
-		return fmt.Errorf("片 %d 写入失败: %w", idx, err)
+	written, werr := io.CopyBuffer(cw, io.LimitReader(resp.Body, remain), buf)
+	cerr := f.Close() // 显式先关流（关流即 flush；错误不再被 defer 吞掉）
+	if werr != nil {
+		return fmt.Errorf("片 %d 写入失败: %w", idx, werr)
+	}
+	if cerr != nil {
+		return fmt.Errorf("feiwu: 片 %d 关流失败: %w", idx, cerr)
 	}
 	if written < remain { // LimitReader 防越界：多余字节绝不越过片尾
 		// 取消/抢占的归类统一交给 fetchSeg 的顺序判定（①②），这里只报
 		// 短体事实（已可重试，从 S+W 断点续）。
 		return fmt.Errorf("片 %d: %w（要 %d 得 %d）", idx, errShortBody, remain, written)
+	}
+	if t.modeB {
+		// 片完成标记（§3.5 5 逐字）：必须等 worker **关闭文件流之后**置——
+		// 关闭即 flush 保证「记账 = 盘上」，合并线程见标记才删分片（提前删
+		// → 后续写入落进已删除文件，数据静默丢失）。
+		if err := markPartDone(t.partsDir, idx); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -478,17 +503,18 @@ func (t *Task) runSingle(ctx context.Context, headers http.Header) error {
 	return t.saveMeta() // 完成凭证（best-effort 由调用方口径覆盖）
 }
 
-// removePartial 删除半成品（§3.10 表「删除」动作）：dest + .qmeta
-// （模式 B 的分片目录由 Task 12 并入同一入口）。best-effort：清理失败
-// 不掩盖任务主错误（返回给调用方决定是否忽略）。
+// removePartial 删除半成品（§3.10 表「删除」动作）：dest + .qmeta +
+// 分片目录（§3.5/Task 12：模式 B 的 <dest>.qparts 连同分片与完成标记
+// 一并清除；模式 A 无此目录，RemoveAll 落空无害）。best-effort：清理
+// 失败不掩盖任务主错误（返回给调用方决定是否忽略）。
 func (t *Task) removePartial() error {
 	err1 := os.Remove(t.Dest)
 	err2 := os.Remove(t.qmetaPath())
-	if err1 != nil && !os.IsNotExist(err1) {
-		return err1
-	}
-	if err2 != nil && !os.IsNotExist(err2) {
-		return err2
+	err3 := os.RemoveAll(t.Dest + ".qparts")
+	for _, err := range []error{err1, err2, err3} {
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	return nil
 }
