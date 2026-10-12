@@ -151,17 +151,19 @@ func TestStaticAssetFromDist(t *testing.T) {
 }
 
 // TestAppLifecycleHooks App 生命周期入口（裁决 P1）：New 装配、Router
-// 可用、Start（restore 钩子空位）在已取消 ctx 下也无害、Close 幂等。
+// 可用、Start 恢复链在已取消 ctx/无凭据下也无害（D9 后 restoreSession
+// 有实义，凭据面按装配前置条件注入 fake）、Close 幂等。
 func TestAppLifecycleHooks(t *testing.T) {
 	app := New(Deps{})
+	app.secrets = &fakeSecrets{} // Start 恢复链读凭据面（与 main 装配对齐）
 	if app.Router() == nil {
 		t.Fatal("Router() 返回 nil")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // 已取消的 ctx：钩子空位阶段不感知取消
+	cancel() // 已取消的 ctx：恢复链不感知取消（keepalive 走独立取消链）
 	if err := app.Start(ctx); err != nil {
-		t.Fatalf("Start = %v, 期望 nil（钩子空位）", err)
+		t.Fatalf("Start = %v, 期望 nil（无凭据静默）", err)
 	}
 
 	app.Close()

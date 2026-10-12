@@ -52,8 +52,8 @@ type App struct {
 }
 
 // New 装配 App（hub、router 一次建好；Router 返回同一实例）。
-// 会话组以生产工厂初始装配（空 jar 未登录态）；Task 7 的 restoreSession
-// 将在 Start 时用 SecretStore 里已存的 Cookie 重建登录态。
+// 会话组以生产工厂初始装配（空 jar 未登录态）；Start 时 restoreSession
+// 用 SecretStore 里已存的 Cookie 重建登录态并启动保活。
 func New(deps Deps) *App {
 	a := &App{
 		paths:       deps.Paths,
@@ -73,10 +73,8 @@ func (a *App) Router() *gin.Engine { return a.router }
 
 // Start 启动钩子：恢复链入口（main 在监听前调用一次）。
 //
-//	restoreSession（Task 7：Cookie 恢复 + 会话装配）
-//	restoreTasks（Task 11：tasks.json 恢复 + 重新提交）
-//
-// 本任务两者均为空方法位——签名与调用链先冻结，后续任务只填实现体。
+//	restoreSession（session.go，D9：Cookie 恢复 + keepalive 启动）
+//	restoreTasks（Task 11：tasks.json 恢复 + 重新提交，现为空方法位）
 func (a *App) Start(ctx context.Context) error {
 	if err := a.restoreSession(ctx); err != nil {
 		return fmt.Errorf("恢复会话: %w", err)
@@ -86,9 +84,6 @@ func (a *App) Start(ctx context.Context) error {
 	}
 	return nil
 }
-
-// restoreSession 会话恢复钩子（Task 7 挂载位）。
-func (a *App) restoreSession(context.Context) error { return nil }
 
 // restoreTasks 任务恢复钩子（Task 11 挂载位）。
 func (a *App) restoreTasks(context.Context) error { return nil }

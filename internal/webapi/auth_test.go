@@ -51,16 +51,17 @@ func (f *fakeQR) ScanURL() string { return f.scanURL }
 // fakeAuth authAPI 的假实现：可绑定真 CookieJar（LoginState 随 jar 走，
 // 与真 session 一致），可注入各方法行为。
 type fakeAuth struct {
-	mu        sync.Mutex
-	jar       *protocol.CookieJar // 绑定后 LoginState 读 __puus
-	startQR   *fakeQR
-	startErr  error
-	exchangeF func(ticket string) (protocol.AccountInfo, error)
-	exchanged []string
-	quickF    func() (bool, protocol.AccountInfo)
-	capF      func() (int64, int64, error)
-	kaStarted int
-	kaCtx     context.Context
+	mu         sync.Mutex
+	jar        *protocol.CookieJar // 绑定后 LoginState 读 __puus
+	startQR    *fakeQR
+	startErr   error
+	exchangeF  func(ticket string) (protocol.AccountInfo, error)
+	exchanged  []string
+	quickF     func() (bool, protocol.AccountInfo)
+	capF       func() (int64, int64, error)
+	kaStarted  int
+	kaCtx      context.Context
+	kaOnExpire func() // 捕获 onExpire 供测试手动触发（App 层驱动登录过期）
 }
 
 func (f *fakeAuth) StartQRLogin(context.Context) (qrSession, error) {
@@ -105,11 +106,12 @@ func (f *fakeAuth) LoginState() bool {
 	return false
 }
 
-func (f *fakeAuth) StartKeepalive(ctx context.Context, _ func()) {
+func (f *fakeAuth) StartKeepalive(ctx context.Context, onExpire func()) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.kaStarted++
 	f.kaCtx = ctx
+	f.kaOnExpire = onExpire
 }
 
 // fakeSecrets SecretStore 假实现：记录每次保存。
@@ -683,5 +685,167 @@ func TestAccountCapacityError(t *testing.T) {
 	}
 	if code, _ := decodeError(t, w.Body.Bytes()); code != "capacity_failed" {
 		t.Fatalf("error.code = %q, 期望 capacity_failed", code)
+	}
+}
+
+// ---- GotTicket 自动链失败注入（Task 6 遗留 minor 1）----
+
+// TestQRStateGotTicketExchangeFails GotTicket → ExchangeCookie 失败 →
+// 500 exchange_failed 且错误信息透传上游明细；ticket 一次性语义不变
+// （会话仍终结，再轮询 400）；不保存凭据、不启 keepalive。
+func TestQRStateGotTicketExchangeFails(t *testing.T) {
+	fa := &fakeAuth{startQR: &fakeQR{
+		scanURL: qrScanURL,
+		results: []qrResult{{state: protocol.QRGotTicket, ticket: "t-bad"}},
+	}}
+	fa.exchangeF = func(string) (protocol.AccountInfo, error) {
+		return protocol.AccountInfo{}, errors.New("换 Cookie 步骤 1(account/info)失败: HTTP 502")
+	}
+	fs := &fakeSecrets{}
+	app := newAuthTestApp(t, fa, fs)
+
+	if w := doReq(t, app.Router(), http.MethodPost, "/api/login/qr/start", nil); w.Code != 200 {
+		t.Fatalf("start 状态码 = %d", w.Code)
+	}
+	w := doReq(t, app.Router(), http.MethodGet, "/api/login/qr/state", nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("state 状态码 = %d, 期望 500（body=%s）", w.Code, w.Body)
+	}
+	code, msg := decodeError(t, w.Body.Bytes())
+	if code != "exchange_failed" {
+		t.Fatalf("error.code = %q, 期望 exchange_failed", code)
+	}
+	if !strings.Contains(msg, "account/info") {
+		t.Fatalf("错误信息 %q 未透传上游失败明细", msg)
+	}
+
+	// ticket 已消费：会话终结，再轮询 400（失败路径同样一次性）。
+	if w2 := doReq(t, app.Router(), http.MethodGet, "/api/login/qr/state", nil); w2.Code != 400 {
+		t.Fatalf("Exchange 失败后再 state 状态码 = %d, 期望 400（会话已终结）", w2.Code)
+	}
+	if n := len(fs.saved); n != 0 {
+		t.Fatalf("失败路径仍保存了 %d 次凭据, 期望 0", n)
+	}
+	fa.mu.Lock()
+	ka := fa.kaStarted
+	fa.mu.Unlock()
+	if ka != 0 {
+		t.Fatalf("失败路径 StartKeepalive 调用 %d 次, 期望 0", ka)
+	}
+}
+
+// TestQRStateGotTicketSaveCookieFails Exchange 成功（jar 进登录态）→
+// SaveCookie 失败 → 500 save_cookie_failed；keepalive 不启动（保活跟着
+// 凭据走：没存下来就不该有心跳）。
+func TestQRStateGotTicketSaveCookieFails(t *testing.T) {
+	fa := &fakeAuth{startQR: &fakeQR{
+		scanURL: qrScanURL,
+		results: []qrResult{{state: protocol.QRGotTicket, ticket: "t-ok"}},
+	}}
+	fa.exchangeF = func(string) (protocol.AccountInfo, error) {
+		// 模拟真实 ExchangeCookie 成功：登录态 Cookie 进 jar。
+		fa.mu.Lock()
+		jar := fa.jar
+		fa.mu.Unlock()
+		jar.LoadFromString("__puus=tok; __pus=p")
+		return protocol.AccountInfo{Nickname: "飞舞用户"}, nil
+	}
+	fs := &fakeSecrets{err: errors.New("keyring 不可用")}
+	app := newAuthTestApp(t, fa, fs)
+
+	if w := doReq(t, app.Router(), http.MethodPost, "/api/login/qr/start", nil); w.Code != 200 {
+		t.Fatalf("start 状态码 = %d", w.Code)
+	}
+	w := doReq(t, app.Router(), http.MethodGet, "/api/login/qr/state", nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("state 状态码 = %d, 期望 500（body=%s）", w.Code, w.Body)
+	}
+	if code, _ := decodeError(t, w.Body.Bytes()); code != "save_cookie_failed" {
+		t.Fatalf("error.code = %q, 期望 save_cookie_failed", code)
+	}
+	fa.mu.Lock()
+	ka := fa.kaStarted
+	fa.mu.Unlock()
+	if ka != 0 {
+		t.Fatalf("保存失败仍启动 keepalive（%d 次）, 期望 0", ka)
+	}
+}
+
+// TestQRStateGotTicketMissingPuusNotLoggedIn 跨链判据统一（Task 6 遗留
+// minor 2）：ExchangeCookie 成功返回但 jar 缺 __puus → 不给 logged_in
+// （与导入链/恢复链同一判据，§2.6 __puus 唯一判据）：500 带原因、
+// 不保存、不启 keepalive。
+func TestQRStateGotTicketMissingPuusNotLoggedIn(t *testing.T) {
+	fa := &fakeAuth{startQR: &fakeQR{
+		scanURL: qrScanURL,
+		results: []qrResult{{state: protocol.QRGotTicket, ticket: "t-no-puus"}},
+	}}
+	fa.exchangeF = func(string) (protocol.AccountInfo, error) {
+		// 协议层成功返回，但 jar 未获得 __puus（上游未下发登录态）。
+		return protocol.AccountInfo{Nickname: "无登录态"}, nil
+	}
+	fs := &fakeSecrets{}
+	app := newAuthTestApp(t, fa, fs)
+
+	if w := doReq(t, app.Router(), http.MethodPost, "/api/login/qr/start", nil); w.Code != 200 {
+		t.Fatalf("start 状态码 = %d", w.Code)
+	}
+	w := doReq(t, app.Router(), http.MethodGet, "/api/login/qr/state", nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("state 状态码 = %d, 期望 500（body=%s）", w.Code, w.Body)
+	}
+	code, msg := decodeError(t, w.Body.Bytes())
+	if code != "exchange_failed" {
+		t.Fatalf("error.code = %q, 期望 exchange_failed", code)
+	}
+	if !strings.Contains(msg, "__puus") {
+		t.Fatalf("错误信息 %q 未说明 __puus 缺失原因", msg)
+	}
+	if n := len(fs.saved); n != 0 {
+		t.Fatalf("缺 __puus 仍保存了 %d 次凭据, 期望 0", n)
+	}
+	fa.mu.Lock()
+	ka := fa.kaStarted
+	fa.mu.Unlock()
+	if ka != 0 {
+		t.Fatalf("缺 __puus 仍启动 keepalive（%d 次）, 期望 0", ka)
+	}
+}
+
+// TestResetSessionStopsKeepalive resetSession 先停旧心跳（Task 6 遗留
+// minor 3）：登录成功启心跳后，resetSession 重建会话（logout 清场与
+// 导入失败回滚共用的重建体）→ 旧 keepalive 的 ctx 已取消、取消开关
+// 归零（弃用 session 上不再心跳空跑）。
+func TestResetSessionStopsKeepalive(t *testing.T) {
+	fa := &fakeAuth{}
+	fs := &fakeSecrets{}
+	app := newAuthTestApp(t, fa, fs)
+
+	// 进入登录态并启心跳。
+	if w := doReq(t, app.Router(), http.MethodPost, "/api/login/cookie",
+		map[string]string{"text": "__puus=u; __pus=p"}); w.Code != 200 {
+		t.Fatalf("导入 Cookie 状态码 = %d（body=%s）", w.Code, w.Body)
+	}
+	fa.mu.Lock()
+	kaCtx := fa.kaCtx
+	fa.mu.Unlock()
+	if kaCtx == nil {
+		t.Fatal("导入成功后 keepalive 未启动")
+	}
+
+	// 重建会话（调用方持锁契约照做）→ 旧心跳应被停掉。
+	app.authMu.Lock()
+	app.resetSession()
+	app.authMu.Unlock()
+	select {
+	case <-kaCtx.Done():
+	default:
+		t.Fatal("resetSession 后旧 keepalive ctx 未取消（弃用 session 上心跳空跑）")
+	}
+	app.authMu.Lock()
+	cancel := app.keepaliveCancel
+	app.authMu.Unlock()
+	if cancel != nil {
+		t.Fatal("resetSession 后 keepaliveCancel 应归零")
 	}
 }

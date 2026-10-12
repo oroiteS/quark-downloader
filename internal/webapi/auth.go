@@ -101,11 +101,27 @@ func newAuthPairDefault(jar *protocol.CookieJar) (*protocol.Session, authAPI) {
 }
 
 // resetSession 重建内存会话：新 CookieJar + 新 Session + 重适配 auth。
-// New 的初始装配与 logout 清场共用——CookieJar 没有清空方法，
-// 重实例化即"清空"（旧实例随旧 session 一并弃用）。
+// New 的初始装配、logout 清场与导入/恢复失败回滚共用——CookieJar 没有
+// 清空方法，重实例化即"清空"（旧实例随旧 session 一并弃用）。
+//
+// 调用方须持 authMu（New 首次调用时尚无并发，裸调安全）。重建时：
+//  1. 先停旧 keepalive——弃用 session 上的心跳不再空跑（§2.6 取消即停）；
+//  2. 挂鉴权自愈（§2.3/D9）：DoAPI 遇 401/403/412 时经本代 authAPI
+//     快速校验登录态，Cookie 仍有效则重试原请求一次。闭包捕获本代
+//     auth（与 session 同代），logout 重建后旧代 session 的自愈不会
+//     误读新代状态。测试工厂只给 fake authAPI（session 为 nil）时跳过
+//     ——heal 挂在 *protocol.Session 上，无 session 无从挂起。
 func (a *App) resetSession() {
+	a.stopKeepaliveLocked()
 	a.jar = protocol.NewCookieJar()
 	a.session, a.auth = a.newAuthPair(a.jar)
+	if s := a.session; s != nil {
+		auth := a.auth
+		s.SetAuthHeal(func(ctx context.Context) bool {
+			ok, _, _ := auth.QuickCheck(ctx)
+			return ok
+		})
+	}
 }
 
 // startKeepaliveLocked 启动保活心跳（先停旧——登录成功重复触发时
@@ -200,6 +216,14 @@ func (a *App) handleQRState(c *gin.Context) {
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, "exchange_failed",
 				"换取登录 Cookie 失败: "+err.Error())
+			return
+		}
+		if !a.auth.LoginState() {
+			// 跨链判据统一（§2.6 __puus 唯一判据）：换 Cookie 协议成功
+			// 返回但 jar 缺 __puus（上游未下发登录态）时不给 logged_in——
+			// 与导入链/恢复链同一判据，杜绝"协议成功=已登录"的误判。
+			writeError(c, http.StatusInternalServerError, "exchange_failed",
+				"换取的 Cookie 缺少 __puus（登录态 Cookie），请重新扫码登录")
 			return
 		}
 		if err := a.secrets.SaveCookie(a.jar.String()); err != nil {
