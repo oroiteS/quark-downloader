@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +22,14 @@ import (
 	"quark-downloader/internal/protocol"
 	"quark-downloader/internal/store"
 )
+
+// tasksFileMu 把 tasks.json 的读-改-写（Load+append+Save）绑成临界区
+// （fix round 1 发现 1）：并发 POST /api/tasks 时后写者必须在前写者
+// 结果之上累加——丢更新=被覆盖方的任务上下文静默丢失（重启不续传、
+// 无 needs_reparse，违反「绝不静默」红线）；同时消除并发 SaveTasks 争
+// 同一 tmp 的 rename 竞态。包级锁与 store.settingsMu/tasksMu 同型
+// （单实例应用前提）；临界区内无网络调用、不碰 authMu——无死锁面。
+var tasksFileMu sync.Mutex
 
 // taskManager 是任务创建消费的最小 manager 面（本包接口化以支持测试
 // fake 注入：直接断言 Submit 收到的 Threads 档位；Task 10 的控制面
@@ -211,6 +221,19 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 			Size:      it.size,
 			CreatedAt: createdAt,
 		}
+		// G11「目标已存在同名完整文件 → 跳过并在任务中标注『已存在』」：
+		// dest 存在且 size 与列表值相符 → 不提交引擎（省一轮对账与登记），
+		// 写一条 Exists=true 的 TaskCtx（EngineID 留空=无引擎任务，T10 的
+		// GET /api/tasks 透出「已存在」终态），同时进响应 skipped。列表
+		// size≤0 时判定不可信——保守提交，完整性对账交给引擎。
+		if it.size > 0 {
+			if st, serr := os.Stat(tc.Dest); serr == nil && st.Size() == it.size {
+				tc.Exists = true
+				newCtxs = append(newCtxs, tc)
+				skipped = append(skipped, skippedItem{it.fid, it.name, "已存在"})
+				continue
+			}
+		}
 		// Refresher 闭包捕获 tc 值拷贝（EngineID 回填不影响刷新语义——
 		// 刷新只消费 fid/分享上下文）。
 		id, err := a.manager.Submit(
@@ -235,9 +258,15 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 		taskIDs = append(taskIDs, id)
 	}
 
-	// 落盘（存量 + 新增，原子覆盖；Task 11 恢复链消费）。
+	// 落盘（存量 + 新增，原子覆盖；Task 11 恢复链消费）。读-改-写整体
+	// 持 tasksFileMu（fix round 1 发现 1）：并发创建请求在此串行化——
+	// 后写者以前写者的落盘结果为存量累加，杜绝丢更新；亦消除并发
+	// SaveTasks 争同一 tmp 的 rename 竞态。
 	if len(newCtxs) > 0 {
-		if err := store.SaveTasks(a.paths, append(store.LoadTasks(a.paths), newCtxs...)); err != nil {
+		tasksFileMu.Lock()
+		err := store.SaveTasks(a.paths, append(store.LoadTasks(a.paths), newCtxs...))
+		tasksFileMu.Unlock()
+		if err != nil {
 			writeError(c, http.StatusInternalServerError, "save_tasks_failed",
 				fmt.Sprintf("已提交 %d 个任务但持久化任务上下文失败（重启后不自动续传）: %v", len(taskIDs), err))
 			return

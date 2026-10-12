@@ -27,6 +27,10 @@ type TaskCtx struct {
 	Dest      string `json:"dest"`      // 目标文件绝对路径
 	Size      int64  `json:"size"`      // 文件总字节
 	CreatedAt int64  `json:"createdAt"` // 任务创建时间(unix 秒)
+	// Exists 提交前已检测到 dest 存在同名完整文件(size 相符,G11「已存在
+	// 跳过」):未提交引擎,EngineID 为空;GET /api/tasks(Task 10)把它透出
+	// 为「已存在」终态。json tag 是 webapi 透传契约。
+	Exists bool `json:"exists,omitempty"`
 }
 
 // CanRefresh 可重取判定。§6.2 原版逐字:fid 非空 且(非分享 或

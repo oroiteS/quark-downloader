@@ -11,15 +11,18 @@
 package webapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"quark-downloader/internal/engine"
 	"quark-downloader/internal/protocol"
@@ -711,4 +714,192 @@ func TestAppCloseClosesManagerConcurrently(t *testing.T) {
 	if n := fm.closeCount(); n < 1 {
 		t.Fatalf("manager.Close 调用 %d 次, 期望 ≥1", n)
 	}
+}
+
+// ---- ⑧ 并发落盘互斥（fix round 1 发现 1）----
+
+// TestCreateTasksConcurrentPersistsBoth 两个并发 POST 各建任务：TaskCtx
+// 的读-改-写（Load+append+Save）必须绑成临界区——否则后写者覆盖前写者，
+// 被覆盖方的任务上下文静默丢失（重启不续传、无 needs_reparse，违反
+// 「绝不静默」红线）。gate 强制两 handler 的 Submit 同步放行，使紧随其
+// 后的落盘段并发重叠（无互斥时表现为丢更新或并发 SaveTasks 争同一
+// tmp 报 500）。
+func TestCreateTasksConcurrentPersistsBoth(t *testing.T) {
+	up := &fakeUpstream{
+		sort: map[string][]protocol.FileEntry{
+			"d0": {{FID: "fa", FileName: "a.bin", Size: 100}},
+			"d1": {{FID: "fb", FileName: "b.bin", Size: 200}},
+		},
+		links: map[string]string{
+			"fa": "https://d.quark.cn/fa?auth_key=k&Expires=1&Signature=s",
+			"fb": "https://d.quark.cn/fb?auth_key=k&Expires=1&Signature=s",
+		},
+	}
+	fm := &fakeManager{}
+	arrived := make(chan struct{}, 16) // 各 handler 首个 Submit 到达信号
+	release := make(chan struct{})
+	fm.submitF = func(call fakeSubmitCall) (string, error) {
+		arrived <- struct{}{}
+		<-release
+		return "t-" + call.LR.FID, nil
+	}
+	paths := taskTestPaths(t)
+	app := newTasksTestApp(t, up, fm, taskTestSettings(filepath.Join(paths.DataDir, "dl")), paths)
+
+	// 并发请求体构造（goroutine 内不触 t.Fatalf，响应由主 goroutine 断言）。
+	post := func(fid string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{"source": "drive", "fids": []string{fid}})
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		app.Router().ServeHTTP(w, req)
+		return w
+	}
+
+	const reqs = 2
+	responses := make([]*httptest.ResponseRecorder, reqs)
+	var wg sync.WaitGroup
+	for i, fid := range []string{"d0", "d1"} {
+		wg.Add(1)
+		go func(i int, fid string) {
+			defer wg.Done()
+			responses[i] = post(fid)
+		}(i, fid)
+	}
+	// 等两个 handler 都进入 Submit，再同时放行 → 落盘段并发开始。
+	for i := 0; i < reqs; i++ {
+		select {
+		case <-arrived:
+		case <-time.After(10 * time.Second):
+			t.Fatal("等待并发请求到达 Submit 超时（协议节流拖慢属预期，10s 应足够）")
+		}
+	}
+	close(release)
+	wg.Wait()
+
+	for i, w := range responses {
+		if w == nil || w.Code != http.StatusOK {
+			body := "<nil>"
+			if w != nil {
+				body = w.Body.String()
+			}
+			t.Fatalf("请求 %d 状态码异常（body=%s）——并发落盘互斥失效", i, body)
+		}
+	}
+	saved := store.LoadTasks(paths)
+	if len(saved) != reqs {
+		t.Fatalf("落盘 TaskCtx %d 条, 期望 %d（丢更新=覆盖丢失；got=%+v）", len(saved), reqs, saved)
+	}
+	got := map[string]bool{}
+	for _, tc := range saved {
+		got[tc.FID] = true
+	}
+	if !got["fa"] || !got["fb"] {
+		t.Fatalf("落盘 fid = %v, 期望 fa 与 fb 都在（后写者不得覆盖前写者）", got)
+	}
+}
+
+// ---- ⑨ 已存在完整文件跳过标注（fix round 1 发现 2 / G11 逐字）----
+
+// TestCreateTasksSkipsExistingCompleteFile G11「目标已存在同名完整文件 →
+// 跳过并在任务中标注『已存在』」：①size 相符 → 不 Submit、skipped 带
+// reason「已存在」、TaskCtx 落盘 Exists=true 且 EngineID 空（T10 的
+// GET /api/tasks 透出终态）；②size 不符（部分文件）→ 正常 Submit；
+// ③列表 size≤0 → 保守不跳过（对账交给引擎）。
+func TestCreateTasksSkipsExistingCompleteFile(t *testing.T) {
+	// seedFile 在 dest 预置 n 字节文件（模拟已存在的下载产物）。
+	seedFile := func(t *testing.T, settings store.Settings, name string, n int64) {
+		t.Helper()
+		if err := os.MkdirAll(settings.DestDir, 0o755); err != nil {
+			t.Fatalf("预置目录: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(settings.DestDir, name), make([]byte, n), 0o644); err != nil {
+			t.Fatalf("预置文件: %v", err)
+		}
+	}
+	newCase := func(listSize int64) (*fakeUpstream, *fakeManager, store.Paths, store.Settings) {
+		up := &fakeUpstream{
+			share: map[string][]protocol.FileEntry{
+				"d0": {{FID: "f1", FileName: "a.bin", Size: listSize, ShareFIDToken: "tok1"}},
+			},
+			links: map[string]string{"f1": "https://d.quark.cn/f1?auth_key=k&Expires=1&Signature=s"},
+		}
+		fm := &fakeManager{}
+		paths := taskTestPaths(t)
+		settings := taskTestSettings(filepath.Join(paths.DataDir, "dl"))
+		return up, fm, paths, settings
+	}
+	post := func(app *App) *httptest.ResponseRecorder {
+		return doReq(t, app.Router(), http.MethodPost, "/api/tasks", map[string]any{
+			"source": "share", "fids": []string{"d0"}, "pwd_id": "pw", "stoken": "st",
+		})
+	}
+
+	t.Run("同名完整文件跳过并标注已存在", func(t *testing.T) {
+		up, fm, paths, settings := newCase(777)
+		seedFile(t, settings, "a.bin", 777)
+		app := newTasksTestApp(t, up, fm, settings, paths)
+
+		w := post(app)
+		if w.Code != http.StatusOK {
+			t.Fatalf("状态码 = %d, 期望 200（body=%s）", w.Code, w.Body)
+		}
+		var body struct {
+			TaskIDs []string `json:"task_ids"`
+			Skipped []struct {
+				FID    string `json:"fid"`
+				Reason string `json:"reason"`
+			} `json:"skipped"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("响应不是合法 JSON: %v（body=%s）", err, w.Body)
+		}
+		if len(body.TaskIDs) != 0 || len(fm.snapshot()) != 0 {
+			t.Fatalf("task_ids = %v, Submit %d 次, 期望均 0（已存在不提交）", body.TaskIDs, len(fm.snapshot()))
+		}
+		if len(body.Skipped) != 1 || body.Skipped[0].FID != "f1" || body.Skipped[0].Reason != "已存在" {
+			t.Fatalf("skipped = %+v, 期望 [{f1 已存在}]（与互斥拒绝文案区分）", body.Skipped)
+		}
+		saved := store.LoadTasks(paths)
+		if len(saved) != 1 || saved[0].FID != "f1" {
+			t.Fatalf("落盘 = %+v, 期望 f1 一条（跳过也落盘标注）", saved)
+		}
+		if !saved[0].Exists || saved[0].EngineID != "" {
+			t.Fatalf("标注 = {Exists:%v EngineID:%q}, 期望 {true \"\"}（无引擎任务）", saved[0].Exists, saved[0].EngineID)
+		}
+	})
+
+	t.Run("size 不符正常提交", func(t *testing.T) {
+		up, fm, paths, settings := newCase(777)
+		seedFile(t, settings, "a.bin", 100) // 部分文件（或同名异容）
+		app := newTasksTestApp(t, up, fm, settings, paths)
+
+		if w := post(app); w.Code != http.StatusOK {
+			t.Fatalf("状态码 = %d, 期望 200（body=%s）", w.Code, w.Body)
+		}
+		if n := len(fm.snapshot()); n != 1 {
+			t.Fatalf("Submit %d 次, 期望 1（size 不符=非完整文件，不跳过）", n)
+		}
+		saved := store.LoadTasks(paths)
+		if len(saved) != 1 || saved[0].Exists || saved[0].EngineID != "t1" {
+			t.Fatalf("落盘 = %+v, 期望 {Exists:false EngineID:t1}", saved)
+		}
+	})
+
+	t.Run("size 非正保守不跳过", func(t *testing.T) {
+		up, fm, paths, settings := newCase(0) // 列表 size≤0：dest 判定不可信
+		seedFile(t, settings, "a.bin", 1)     // 即使 dest 有同名文件
+		app := newTasksTestApp(t, up, fm, settings, paths)
+
+		if w := post(app); w.Code != http.StatusOK {
+			t.Fatalf("状态码 = %d, 期望 200（body=%s）", w.Code, w.Body)
+		}
+		if n := len(fm.snapshot()); n != 1 {
+			t.Fatalf("Submit %d 次, 期望 1（size≤0 不做已存在判定，交给引擎对账）", n)
+		}
+		saved := store.LoadTasks(paths)
+		if len(saved) != 1 || saved[0].Exists {
+			t.Fatalf("落盘 = %+v, 期望 {Exists:false}（保守路径不标注）", saved)
+		}
+	})
 }
