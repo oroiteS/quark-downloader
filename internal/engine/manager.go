@@ -85,6 +85,11 @@ var ErrTaskNotFound = errors.New("feiwu: 任务不存在")
 // ErrClosed Manager 已 Close：Submit 拒绝新任务（F2 审查）。
 var ErrClosed = errors.New("feiwu: Manager 已关闭")
 
+// ErrInvalidThreads SubmitOpt.Threads 参数错误（负数）：Submit 在启动
+// 任务 goroutine 前同步拒绝（与 ErrClosed 同级 sentinel——Task 12 Web
+// API 统一错误码按本变量接线）。
+var ErrInvalidThreads = errors.New("feiwu: SubmitOpt.Threads 为负")
+
 // Event 任务事件：进度帧（节流 500ms）与终态帧（Done 单调不减）。
 type Event struct {
 	TaskID   string
@@ -94,6 +99,11 @@ type Event struct {
 
 // SubmitOpt Submit 可选注入（零值全空 = 无自愈，401/403/412 直接失败）。
 type SubmitOpt struct {
+	// Threads 逐任务并发档位（E7 预算接线）：0 = 用 Manager cfg.Threads
+	// 缺省；>512 钳 512（effMax，§3.3）；<0 拒绝（ErrInvalidThreads，
+	// Submit 同步返回）。档位随任务登记贯穿全生命周期（自愈换链/暂停
+	// 续传/Retry 重跑都按它装配 worker）。
+	Threads int
 	// Refresher 重取直链回调（§2.10：需要保存 fid/分享上下文才能重取，
 	// 由上层注入）。ctx 由 Manager 提供——挂在该任务取消链上（Cancel 可
 	// 达）并带 60s 超时，回调应尊重 ctx；两层任一到期、返回错误、返回
@@ -120,6 +130,7 @@ type managedTask struct {
 	lr        protocol.LinkResult
 	cookie    string
 	mode      Mode
+	threads   int // 并发档位（SubmitOpt.Threads 解析后：≥1、≤effMax；E7）
 	refresher func(ctx context.Context) (string, error)
 
 	mu        sync.Mutex
@@ -193,7 +204,9 @@ func NewManager(cfg Config, onEvent func(Event)) *Manager {
 // FileName（relDir 相对目录落盘，拒绝 .. 逃逸）；同路径互斥（TryLockDest
 // 失败 → 「同一文件正在下载中」，不排队——两个下载器交叉写同一文件会
 // 损坏数据，§3.13）。mode 逐文件生效；opts 注入 Refresher（§2.10 自愈，
-// 缺省 401/403/412 直接失败）。
+// 缺省 401/403/412 直接失败）与 Threads（E7 逐任务档位：0=cfg.Threads
+// 缺省、>512 钳 effMax、<0 拒绝——参数错误与 FileName/URL/Size 同区
+// 校验，在占 dest 锁、启动 goroutine 之前同步返回）。
 func (m *Manager) Submit(lr protocol.LinkResult, relDir, cookieStr string, mode Mode, opts ...SubmitOpt) (string, error) {
 	if m.isClosed() {
 		return "", ErrClosed
@@ -213,6 +226,23 @@ func (m *Manager) Submit(lr protocol.LinkResult, relDir, cookieStr string, mode 
 	if clean := filepath.Clean(relDir); clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("feiwu: Submit: relDir %q 逃逸 DestDir", relDir)
 	}
+	// E7（Task 8）：opts 解析与参数校验同区——负档位是参数错误，必须在
+	// 占 dest 锁前拒绝（失败路径不留任何登记）。多个 opts 时后者覆盖
+	// 先者（与 Refresher 同语义）。
+	threads := m.cfg.Threads // SubmitOpt.Threads=0 的缺省档位
+	var refresher func(ctx context.Context) (string, error)
+	for _, o := range opts {
+		if o.Threads < 0 {
+			return "", fmt.Errorf("%w: %d", ErrInvalidThreads, o.Threads)
+		}
+		if o.Threads > 0 {
+			threads = o.Threads
+		}
+		if o.Refresher != nil {
+			refresher = o.Refresher
+		}
+	}
+	threads = min(threads, effMax) // >512 钳 512（§3.3 有效并发上限）
 	dest := filepath.Join(m.cfg.DestDir, relDir, lr.FileName)
 	abs, err := filepath.Abs(dest)
 	if err != nil {
@@ -226,12 +256,6 @@ func (m *Manager) Submit(lr protocol.LinkResult, relDir, cookieStr string, mode 
 		return "", fmt.Errorf("feiwu: 同一文件正在下载中: %s", dest)
 	}
 
-	var refresher func(ctx context.Context) (string, error)
-	for _, o := range opts {
-		if o.Refresher != nil {
-			refresher = o.Refresher
-		}
-	}
 	id := fmt.Sprintf("t%d", m.nextID.Add(1))
 	mt := &managedTask{
 		id:        id,
@@ -240,6 +264,7 @@ func (m *Manager) Submit(lr protocol.LinkResult, relDir, cookieStr string, mode 
 		lr:        lr,
 		cookie:    cookieStr,
 		mode:      mode,
+		threads:   threads,
 		refresher: refresher,
 		phase:     phaseQueued,
 	}
@@ -271,7 +296,10 @@ func (m *Manager) Submit(lr protocol.LinkResult, relDir, cookieStr string, mode 
 // 先清 dest/.qmeta/.qparts 残留（见 loop；Submit 期的预览调用不清——
 // 排队/取消都不该动用户旧文件）。
 func (m *Manager) buildAttempt(mt *managedTask, url string) (*Task, bool) {
-	tk := newTask(mt.id, mt.dest, url, mt.cookie, m.cfg.Threads, mt.lr.Size)
+	// E7（Task 8）：并发档位取任务登记值（Submit 解析：SubmitOpt.Threads
+	// 覆盖 cfg.Threads、钳 effMax）——自愈换链/暂停续传/Retry 重跑的全部
+	// attempt 都按同一档位装配，不回退 cfg。
+	tk := newTask(mt.id, mt.dest, url, mt.cookie, mt.threads, mt.lr.Size)
 	if mt.mode == ModeB {
 		tk.modeB = true
 		tk.partsDir = mt.dest + ".qparts"

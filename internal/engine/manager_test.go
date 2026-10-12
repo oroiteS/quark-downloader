@@ -1107,3 +1107,191 @@ func TestProgressThrottle(t *testing.T) {
 		}
 	}
 }
+
+// ---- Task 8（E7 预算接线）：SubmitOpt.Threads 逐任务档位 ----------------------
+
+// inflightTracker 在飞连接计数：drip handler 进入 +1、退出 -1，max 记录
+// 历史峰值——「单任务并发上限」的行为证据（在飞下载数 ≤ worker 数 =
+// min(Threads, 片数, 512)；monitor/监视线程不发请求，服务器收到的全是
+// worker 的 Range GET）。
+type inflightTracker struct {
+	mu  sync.Mutex
+	cur int
+	max int
+}
+
+func (tr *inflightTracker) enter() {
+	tr.mu.Lock()
+	tr.cur++
+	if tr.cur > tr.max {
+		tr.max = tr.cur
+	}
+	tr.mu.Unlock()
+}
+
+func (tr *inflightTracker) exit() {
+	tr.mu.Lock()
+	tr.cur--
+	tr.mu.Unlock()
+}
+
+func (tr *inflightTracker) peak() int {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return tr.max
+}
+
+// newDripServerInflight 带在飞连接计数的 drip server（滴灌节奏同
+// newDripServer；4MB 源在档位 ≤8 下切 8 片 × 512KB，每片 8 块 × 20ms，
+// 慢速窗口保证多 worker 同时在飞可观察）。
+func newDripServerInflight(t *testing.T, data []byte, block int64, per time.Duration) (*httptest.Server, *inflightTracker, *rangeRecorder) {
+	t.Helper()
+	rec := &rangeRecorder{}
+	tr := &inflightTracker{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tr.enter()
+		defer tr.exit()
+		var a, b int64
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &a, &b); err != nil {
+			t.Errorf("畸形 Range 头 %q: %v", r.Header.Get("Range"), err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		rec.add(a, b)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+		w.WriteHeader(http.StatusPartialContent)
+		for s := a; s <= b; s += block {
+			e := min(s+block-1, b)
+			if _, err := w.Write(data[s : e+1]); err != nil {
+				return // 客户端取消（暂停/取消在飞请求）
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			if e < b {
+				time.Sleep(per) // 块间隔滴灌；最后一块后不睡——收尾尾巴
+				// 会被计入在飞峰值（worker 读满片长即换片，不等 handler
+				// 退出），系统性抬高 peak、打破「峰值 ≤ worker 数」上界。
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, tr, rec
+}
+
+// TestSubmitOptThreads 逐任务并发档位（Task 8 / E7）四个断面：
+//  1. per-task 生效：cfg=8 而 opt=2 → 在飞连接峰值恰 2（档位压过 cfg）；
+//  2. 0 回落 cfg.Threads：opt=0、cfg=3 → 峰值 ≤3 且确实多路（≥2——0 被
+//     穿透直传 newTask 会得 n=1 单连接）；
+//  3. >512 钳 512（effMax）：opt=513 → 任务档位恰 512、闸门容量
+//     min(512, 片数)（4MB 源仅 8 片 <512，513/512 行为等价——断装配值）；
+//  4. <0 拒绝：Submit 同步返回 ErrInvalidThreads（goroutine 未启动、
+//     未占 dest 锁）——同路径合法任务随即成功证失败路径干净。
+func TestSubmitOptThreads(t *testing.T) {
+	t.Run("PerTaskCap", func(t *testing.T) {
+		total := int64(4 << 20)
+		data := testPattern(total)
+		srv, tr, rec := newDripServerInflight(t, data, 64<<10, 20*time.Millisecond)
+		dir := t.TempDir()
+		m := NewManager(Config{Threads: 8, Mode: ModeA, MaxConcurrentTasks: 3, DestDir: dir}, nil)
+		m.taskTune = fastTune
+		defer m.Close()
+
+		id, err := m.Submit(protocol.LinkResult{FID: "pt", FileName: "pt.bin", Size: total, URL: srv.URL}, "", "", ModeA, SubmitOpt{Threads: 2})
+		if err != nil {
+			t.Fatalf("Submit(Threads:2): %v", err)
+		}
+		p := waitForState(t, m, id, "done", 60*time.Second)
+		if p.Done != total {
+			t.Errorf("终态 Done=%d, want %d", p.Done, total)
+		}
+		mustEqualFile(t, filepath.Join(dir, "pt.bin"), data)
+		if peak := tr.peak(); peak != 2 {
+			t.Errorf("在飞连接峰值 = %d, want 2（cfg=8 应被 per-task 档位 2 压制）", peak)
+		}
+		if n := len(rec.snapshot()); n < 2 {
+			t.Errorf("服务器仅收到 %d 个请求（want ≥2，8 片多路分发）", n)
+		}
+	})
+
+	t.Run("ZeroFallsBackToCfg", func(t *testing.T) {
+		total := int64(4 << 20)
+		data := testPattern(total)
+		srv, tr, _ := newDripServerInflight(t, data, 64<<10, 20*time.Millisecond)
+		dir := t.TempDir()
+		m := NewManager(Config{Threads: 3, Mode: ModeA, MaxConcurrentTasks: 3, DestDir: dir}, nil)
+		m.taskTune = fastTune
+		defer m.Close()
+
+		id, err := m.Submit(protocol.LinkResult{FID: "z0", FileName: "z0.bin", Size: total, URL: srv.URL}, "", "", ModeA, SubmitOpt{Threads: 0})
+		if err != nil {
+			t.Fatalf("Submit(Threads:0): %v", err)
+		}
+		waitForState(t, m, id, "done", 60*time.Second)
+		mustEqualFile(t, filepath.Join(dir, "z0.bin"), data)
+		peak := tr.peak()
+		if peak > 3 {
+			t.Errorf("在飞连接峰值 = %d, want ≤3（Threads=0 应回落 cfg.Threads=3）", peak)
+		}
+		if peak < 2 {
+			t.Errorf("在飞连接峰值 = %d, want ≥2（Threads=0 不应穿透为单连接档位）", peak)
+		}
+	})
+
+	t.Run("ClampToEffMax", func(t *testing.T) {
+		total := int64(4 << 20)
+		data := testPattern(total)
+		srv, _, _ := newDripServerInflight(t, data, 64<<10, 20*time.Millisecond)
+		dir := t.TempDir()
+		m := NewManager(Config{Threads: 2, Mode: ModeA, MaxConcurrentTasks: 3, DestDir: dir}, nil)
+		m.taskTune = fastTune
+		defer m.Close()
+
+		id, err := m.Submit(protocol.LinkResult{FID: "c513", FileName: "c513.bin", Size: total, URL: srv.URL}, "", "", ModeA, SubmitOpt{Threads: 513})
+		if err != nil {
+			t.Fatalf("Submit(Threads:513): %v", err)
+		}
+		waitForState(t, m, id, "done", 60*time.Second)
+		mustEqualFile(t, filepath.Join(dir, "c513.bin"), data)
+
+		mt := m.lookup(id)
+		mt.mu.Lock()
+		tk, mtThreads := mt.task, mt.threads
+		mt.mu.Unlock()
+		if mtThreads != effMax {
+			t.Errorf("登记档位 mt.threads = %d, want %d（513 应钳 effMax）", mtThreads, effMax)
+		}
+		if tk.Threads != effMax {
+			t.Errorf("任务档位 tk.Threads = %d, want %d（513 应钳 effMax）", tk.Threads, effMax)
+		}
+		g, ok := tk.gate.(*Gate)
+		if !ok {
+			t.Fatalf("闸门未装配为 *Gate（got %T）", tk.gate)
+		}
+		if want := min(effMax, len(tk.Segs)); g.n != want {
+			t.Errorf("闸门容量 = %d, want %d（min(effMax, 片数)）", g.n, want)
+		}
+	})
+
+	t.Run("NegativeRejected", func(t *testing.T) {
+		total := int64(4 << 20)
+		data := testPattern(total)
+		srv, _, _ := newDripServerInflight(t, data, 64<<10, 20*time.Millisecond)
+		dir := t.TempDir()
+		m := NewManager(Config{Threads: 2, Mode: ModeA, MaxConcurrentTasks: 3, DestDir: dir}, nil)
+		m.taskTune = fastTune
+		defer m.Close()
+
+		lr := protocol.LinkResult{FID: "neg", FileName: "neg.bin", Size: total, URL: srv.URL}
+		if _, err := m.Submit(lr, "", "", ModeA, SubmitOpt{Threads: -1}); !errors.Is(err, ErrInvalidThreads) {
+			t.Fatalf("Submit(Threads:-1) err = %v, want ErrInvalidThreads（启动 goroutine 前同步拒绝）", err)
+		}
+		// 失败不留痕：dest 锁未占用——同路径合法任务随即成功并跑完。
+		id, err := m.Submit(lr, "", "", ModeA)
+		if err != nil {
+			t.Fatalf("负档位拒绝后同路径重提: %v（dest 锁疑似被失败路径占用）", err)
+		}
+		waitForState(t, m, id, "done", 60*time.Second)
+		mustEqualFile(t, filepath.Join(dir, "neg.bin"), data)
+	})
+}
