@@ -55,7 +55,7 @@ func SaveQMeta(path string, m *QMeta) error {
 	segs := layout(m.Total, n)
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d\n%d\n", m.Total, n) // 行1 total；行2 n
-	for i, s := range segs { // 行3..n+2: 每片 S,E,W
+	for i, s := range segs {                // 行3..n+2: 每片 S,E,W
 		fmt.Fprintf(&b, "%d,%d,%d\n", s.Start, s.End, m.W[i])
 	}
 

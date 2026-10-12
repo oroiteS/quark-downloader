@@ -496,6 +496,320 @@ func TestSameDestMutex(t *testing.T) {
 	mustEqualFile(t, filepath.Join(dir, "dup.bin"), data)
 }
 
+// ---- 最终审查修复波（C1/I1/I2/I3/I5/锚测试 A/B） -----------------------------
+
+// TestManagerModeBFreshStartClearsDest C1（最终审查）：模式 B 全新开始
+// （.qmeta 缺失/损坏/total 不符 → 对账丢弃）而 dest 已有内容时（典型：
+// 同名不同大小的新文件），合并线程 O_APPEND 只追加——新分片全部落到旧
+// 文件尾部：dest 永远无法等于 total 且用户旧文件被破坏，Retry 持续错位。
+// 修复：起跑前判定全新开始则清 dest/.qmeta/.qparts 残留；完成后逐字节
+// 等于新数据。
+func TestManagerModeBFreshStartClearsDest(t *testing.T) {
+	total := int64(8 << 20)
+	data := testPattern(total)
+	srv, _ := newRangeServer(t, data)
+	dir := t.TempDir()
+	m := NewManager(Config{Threads: 8, Mode: ModeB, MaxConcurrentTasks: 1, DestDir: dir}, nil)
+	m.taskTune = fastTune
+
+	dest := filepath.Join(dir, "same.bin")
+	// 布置「同名不同大小新文件」现场：dest 有旧内容、有旧分片残留、无 .qmeta。
+	writeN(t, dest, 123456, 9)
+	os.MkdirAll(dest+".qparts", 0o755)
+	writeN(t, filepath.Join(dest+".qparts", "p000000"), 1<<20, 8) // 比新片大的旧分片
+
+	id, err := m.Submit(protocol.LinkResult{FID: "c1", FileName: "same.bin", Size: total, URL: srv.URL}, "", "", ModeB)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	waitForState(t, m, id, "done", 30*time.Second)
+	mustEqualFile(t, dest, data) // 逐字节等于新数据（旧内容不得残留/错位）
+	if _, err := os.Stat(dest + ".qparts"); !os.IsNotExist(err) {
+		t.Errorf("成功后分片目录应清空删除: %v", err)
+	}
+}
+
+// TestPauseInBuildAttemptWindow I1-a（最终审查，Ruling E8）：Pause 落在
+// loop 顶检查之后、setRunning 之前的 buildAttempt 窗口——旧实现无人消费
+// （首迭代期 Pause 只设意愿不注入），整个下载跑完才了事，暂停丢失。
+// 修复：loop 在 setRunning 之后立即复查暂停/取消意愿。taskTune 钩子把
+// Pause 精确注入到 buildAttempt 窗口内（#1 是 Submit 期预览调用，#2 才是
+// loop 顶检查已过之后的装配调用）。
+func TestPauseInBuildAttemptWindow(t *testing.T) {
+	total := int64(8 << 20)
+	data := testPattern(total)
+	srv, rec := newDripServer(t, data, 64<<10, 20*time.Millisecond)
+	dir := t.TempDir()
+	m := NewManager(Config{Threads: 8, DestDir: dir}, nil)
+
+	var tunes atomic.Int32
+	m.taskTune = func(tk *Task) {
+		fastTune(tk)
+		if tunes.Add(1) == 2 {
+			m.Pause(tk.ID) // 精确落在 loop 的 buildAttempt 窗口（setRunning 前）
+		}
+	}
+
+	id, err := m.Submit(protocol.LinkResult{FID: "i1a", FileName: "win.bin", Size: total, URL: srv.URL}, "", "", ModeA)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	waitForState(t, m, id, "paused", 10*time.Second)
+	if n := len(rec.snapshot()); n != 0 {
+		t.Errorf("窗口内暂停应在起跑前消费（服务器请求数 %d, want 0）", n)
+	}
+	m.Resume(id)
+	waitForState(t, m, id, "done", 60*time.Second)
+	mustEqualFile(t, filepath.Join(dir, "win.bin"), data)
+}
+
+// TestCancelChainGeneration I1-c（最终审查，Ruling E8）：Resume 后新 loop
+// 注册的取消链可能被旧 loop 的 deferred setCancel(nil) 覆盖——此后 Cancel
+// 读到 nil 只设标志，在跑 attempt 掐不断，控制面丢失。修复：cancel 链加
+// 代际 token，deferred 清空仅同代生效。编排确定性复现：旧 loop 卡在
+// suspend 终帧的 onEvent 里（deferred 清空未跑）→ Resume 起新 loop（cap=2
+// 有空槽，不等旧 loop 退出）→ 等新 loop 注册完新链（taskTune#3 卡点）→
+// 放旧 loop 收尾（旧代码必把新链清成 nil）→ 放新 loop 起跑 → Cancel。
+func TestCancelChainGeneration(t *testing.T) {
+	total := int64(8 << 20)
+	data := testPattern(total)
+	srv, _ := newDripServer(t, data, 64<<10, 20*time.Millisecond)
+	dir := t.TempDir()
+
+	pausedFinal := make(chan struct{})
+	releaseOld := make(chan struct{})
+	newTuned := make(chan struct{})
+	releaseNew := make(chan struct{})
+	var once sync.Once
+	var tunes atomic.Int32
+
+	m := NewManager(Config{Threads: 8, MaxConcurrentTasks: 2, DestDir: dir}, func(e Event) {
+		if e.Err == nil && e.Progress.State == "paused" {
+			once.Do(func() {
+				close(pausedFinal) // 旧 loop 已进入 suspend 的 emitFinal
+				<-releaseOld       // 卡住旧 loop：onEvent 不返回 → deferred 清空未跑
+			})
+		}
+	})
+	m.taskTune = func(tk *Task) {
+		fastTune(tk)
+		if tunes.Add(1) == 3 { // #1 Submit 预览 / #2 loop1 尝试 / #3 Resume 后 loop2 尝试
+			close(newTuned) // 新 loop 已过取消链注册（setCancelGen），卡在 buildAttempt
+			<-releaseNew
+		}
+	}
+
+	id, err := m.Submit(protocol.LinkResult{FID: "i1c", FileName: "gen.bin", Size: total, URL: srv.URL}, "", "", ModeA)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	p1 := waitForDoneGt(t, m, id, 0, 30*time.Second) // loop1 在跑（代 1 链已注册）
+
+	m.Pause(id)
+	<-pausedFinal                                    // 旧 loop 卡在终帧回调
+	m.Resume(id)                                     // 新 loop 起跑（不等旧 loop 退出）
+	<-newTuned                                       // 新链已注册（代 2）
+	close(releaseOld)                                // 旧 loop 收尾：deferred 清 cancel——旧代码覆盖新链为 nil
+	close(releaseNew)                                // 新 loop 继续：setRunning → E8 复查 → runA 续传
+	waitForDoneGt(t, m, id, p1.Done, 30*time.Second) // 新 attempt 确在跑
+
+	m.Cancel(id) // 必须经新代链掐到在跑 attempt
+	waitForState(t, m, id, "canceled", 30*time.Second)
+	dest := filepath.Join(dir, "gen.bin")
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Errorf("用户取消应删半成品: %v", err)
+	}
+}
+
+// TestCloseWaitsRacingSubmit I5（最终审查）：Submit 的 wg.Add 必须与 closed
+// 复查同处 m.mu 临界区——否则 Close 的 wg.Wait 可从 Submit「已注册、未
+// Add」的纳秒窗口穿过：Close 返回后任务 goroutine 才起跑，等齐契约破产。
+// 窗口无外部可注入的阻塞点（Unlock→Add 之间是直线代码），只能压力复现：
+// 数百轮并发 Submit/Close，断言 Close 返回瞬间已受理任务必已终态。
+// 修复后该断言被结构性保证（Add 与注册同临界区，Close 的 closed=true 与
+// wg.Wait 同锁序），测试恒绿；修复前为概率红（race 命中窗口时任务仍在
+// pending/running）。
+func TestCloseWaitsRacingSubmit(t *testing.T) {
+	total := int64(1 << 20)
+	data := testPattern(total)
+	srv, _ := newRangeServer(t, data)
+	lr := protocol.LinkResult{FID: "i5", FileName: "race.bin", Size: total, URL: srv.URL}
+	dir := t.TempDir()
+
+	type res struct {
+		id  string
+		err error
+	}
+	for range 300 {
+		m := NewManager(Config{Threads: 4, DestDir: dir}, nil)
+		m.taskTune = fastTune
+		done := make(chan res, 1)
+		go func() {
+			id, err := m.Submit(lr, "", "", ModeA)
+			done <- res{id, err}
+		}()
+		m.Close()
+		r := <-done
+		if r.err != nil {
+			continue // 输给 Close（ErrClosed）：合法路径
+		}
+		p, err := m.Get(r.id) // Close 已返回：立即查询必须是终态
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		switch p.State {
+		case "done", "error", "canceled":
+		default:
+			t.Fatalf("Close 已返回但任务 %s 仍在 %s（Submit 的 wg.Add 竞态：goroutine 未被等齐）", r.id, p.State)
+		}
+	}
+}
+
+// TestRefreshLimitFive 锚测试 A（最终审查）：§2.10 刷新上限逐字「刷新次数
+// < 5」——有进度的 401 循环（前 4 片正常、其后恒 401）+ refresher 每次给
+// 全新 URL：每次换链重跑都从断点续传后在同一处碰 401，直到第 6 次尝试
+// 的刷新请求被拒（used=5 ≥ refreshMax）。断言：任务终态 error、refresher
+// 恰被调 5 次、断点保留（.qmeta 在盘且 ΣW=已下字节——零进度形态不在此
+// 断言：零进度走 §3.10 4xx 兜底按规格先删后试，无断点可保）。
+func TestRefreshLimitFive(t *testing.T) {
+	total := int64(8 << 20)
+	data := testPattern(total)
+	const seg = 512 << 10
+	const okUntil = 4 * seg
+	const threads = 1 // 单 worker 串行：断点确定（推导见 TestLinkRefresh）
+	srv, _ := newAuthServer(t, data, okUntil)
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "lim.bin")
+
+	var calls atomic.Int32
+	m := NewManager(Config{Threads: threads, DestDir: dir}, nil)
+	m.taskTune = fastTune
+	id, err := m.Submit(protocol.LinkResult{FID: "a1", FileName: "lim.bin", Size: total, URL: srv.URL},
+		"", "", ModeA, SubmitOpt{Refresher: func(ctx context.Context) (string, error) {
+			n := calls.Add(1)
+			return fmt.Sprintf("%s?refresh=%d", srv.URL, n), nil // 每次全新 URL → 每次都换链重跑
+		}})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	// 等 **Manager 级**终态而非 waitForState：runA 收尾把 Task 级状态置
+	// error，自愈换链窗口内（phase 仍 running）Get 会短暂报 "error"——
+	// waitForState 会提前返回，把仍在刷新重跑中的任务误判为终态。
+	waitTerminal(t, m, id, "error", 30*time.Second)
+
+	if n := calls.Load(); n != 5 {
+		t.Fatalf("refresher 恰被调 5 次（第 6 次刷新被拒）, got %d", n)
+	}
+	qm, err := LoadQMeta(dest + ".qmeta")
+	if err != nil {
+		t.Fatalf("刷新耗尽终态 error 应保留断点 .qmeta: %v", err)
+	}
+	var sum int64
+	for _, w := range qm.W {
+		sum += w
+	}
+	if sum != okUntil {
+		t.Errorf("断点 ΣW=%d, want %d（前 4 片应完整保留）", sum, okUntil)
+	}
+}
+
+// TestZeroConfigDefaults 锚测试 B（最终审查）：G5 零值默认——
+// NewManager(Config{DestDir: dir}) 后 Submit 成功且走 Threads=32 /
+// ModeA / 3 任务语义。断言方式说明：规范化（零值→默认）是 NewManager
+// 的纯字段变换，字段级直接断言最准；Threads=32 的行为效果（N=min
+// (Threads,片数,512) 路数）已有 TestManagerEndToEnd 覆盖，此处补
+// MaxConcurrentTasks=3 的行为证据（第 4 个任务必须排队，并发峰值恰 3）
+// 与零值配置端到端可用（全部完成 + 逐字节一致）。
+func TestZeroConfigDefaults(t *testing.T) {
+	total := int64(8 << 20)
+	data := testPattern(total)
+	srv, _ := newDripServer(t, data, 64<<10, 20*time.Millisecond)
+	dir := t.TempDir()
+
+	m := NewManager(Config{DestDir: dir}, nil) // G5：除 DestDir 外全零值
+	if m.cfg.Threads != 32 {
+		t.Errorf("零值 Threads 应规范化为 32, got %d", m.cfg.Threads)
+	}
+	if m.cfg.MaxConcurrentTasks != 3 {
+		t.Errorf("零值 MaxConcurrentTasks 应规范化为 3, got %d", m.cfg.MaxConcurrentTasks)
+	}
+	if m.cfg.Mode != ModeA {
+		t.Errorf("零值 Mode 应规范化为 ModeA, got %v", m.cfg.Mode)
+	}
+	m.taskTune = fastTune
+
+	var ids []string
+	for _, name := range []string{"z1.bin", "z2.bin", "z3.bin", "z4.bin"} {
+		id, err := m.Submit(protocol.LinkResult{FID: name, FileName: name, Size: total, URL: srv.URL}, "", "", ModeA)
+		if err != nil {
+			t.Fatalf("Submit(%s): %v", name, err)
+		}
+		ids = append(ids, id)
+	}
+
+	// 行为证据：4 任务 > 默认 3 槽 → 并发运行峰值恰为 3（第 4 个排队）。
+	maxRunning := 0
+	for {
+		running, finished := 0, 0
+		for _, id := range ids {
+			p, err := m.Get(id)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			switch p.State {
+			case "running":
+				running++
+			case "done", "error", "canceled":
+				finished++
+			}
+		}
+		if running > maxRunning {
+			maxRunning = running
+		}
+		if finished == len(ids) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if maxRunning != 3 {
+		t.Errorf("并发运行峰值 = %d, want 3（零值默认 MaxConcurrentTasks=3 的任务语义）", maxRunning)
+	}
+	for i, name := range []string{"z1.bin", "z2.bin", "z3.bin", "z4.bin"} {
+		p, err := m.Get(ids[i])
+		if err != nil || p.State != "done" {
+			t.Fatalf("零值配置应整体可用: %s State=%s err=%v", name, p.State, err)
+		}
+		mustEqualFile(t, filepath.Join(dir, name), data)
+	}
+	m.Close()
+}
+
+// waitTerminal 轮询直到任务到达 **Manager 级**终态（phaseTerminal 且
+// terminal==want）。与 waitForState 的区别：后者看 Get 的 State 字符串，
+// 会被 attempt 级的瞬态污染（runA 失败收尾置 Task.state=error，自愈换链
+// 窗口内 Get 短暂报 error 而 phase 仍是 running）。
+func waitTerminal(t *testing.T, m *Manager, id, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		mt := m.lookup(id)
+		if mt == nil {
+			t.Fatalf("waitTerminal: 任务 %s 不存在", id)
+		}
+		mt.mu.Lock()
+		ok := mt.phase == phaseTerminal && mt.terminal == want
+		state := mt.terminal
+		mt.mu.Unlock()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("等待任务 %s 到达终态 %s 超时（当前 terminal=%q）", id, want, state)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // ---- 审查修复 F1/F2 回归 -----------------------------------------------------
 
 // TestRefreshCancelChain F1（审查）：Refresher 的 ctx 必须挂在任务取消链上。
@@ -532,10 +846,16 @@ func TestRefreshCancelChain(t *testing.T) {
 		case <-time.After(10 * time.Second):
 			t.Fatalf("Cancel 未传导到 refresher ctx（挂起 10s 未被掐——取消链断裂，槽位被永久占用）")
 		}
-		// 掐断 = 取不到新链 → 中止保留断点（F1 判定）
-		waitForState(t, m, id, "error", 30*time.Second)
-		if _, err := LoadQMeta(filepath.Join(dir, "rc.bin") + ".qmeta"); err != nil {
-			t.Fatalf("取消掐断刷新应中止保留断点: %v", err)
+		// I3（最终审查）：刷新窗口内用户取消——终态按 canceled 记（原实现
+		// 记 error）；删除语义由 finishCanceled 兜底（§3.10 用户主动取消
+		// → 删 dest + .qmeta；与 Close 停机的保留分支相对）。
+		waitForState(t, m, id, "canceled", 30*time.Second)
+		rcDest := filepath.Join(dir, "rc.bin")
+		if _, err := os.Stat(rcDest); !os.IsNotExist(err) {
+			t.Errorf("刷新窗口用户取消应删半成品: %v", err)
+		}
+		if _, err := os.Stat(rcDest + ".qmeta"); !os.IsNotExist(err) {
+			t.Errorf("刷新窗口用户取消应删 .qmeta: %v", err)
 		}
 		// 槽位释放证明：1 槽 Manager 还能接新任务并跑完
 		srvB, _ := newRangeServer(t, data)
@@ -659,20 +979,23 @@ func TestEviction(t *testing.T) {
 	})
 }
 
-// TestManagerClose F2（审查）：Close 取消全部未终态任务、等齐全部任务
-// goroutine 后返回；幂等；Close 后 Submit 报 ErrClosed、Retry/Resume
-// 不复活。
+// TestManagerClose F2（审查）+ E6（最终审查）：Close=停止全部任务并
+// **保留断点**（删除只属于用户显式 Cancel）——运行中经挂起类收尾走保留
+// 分支、排队/暂停直接置终态保留；Close 返回即全部任务 goroutine 已退出；
+// 幂等；Close 后 Submit 报 ErrClosed、Retry/Resume 不复活。保留的断点
+// 必须可续：新 Manager（模拟进程重启）Submit 同文件从断点无损续传完成
+// （D9/G4 重启续传愿景）。
 func TestManagerClose(t *testing.T) {
 	total := int64(8 << 20)
 	data := testPattern(total)
-	srv, _ := newDripServer(t, data, 64<<10, 50*time.Millisecond)
+	drip, _ := newDripServer(t, data, 64<<10, 50*time.Millisecond)
 	dir := t.TempDir()
 	m := NewManager(Config{Threads: 4, MaxConcurrentTasks: 1, DestDir: dir}, nil)
 	m.taskTune = fastTune
 
 	submit := func(name string) string {
 		t.Helper()
-		id, err := m.Submit(protocol.LinkResult{FID: name, FileName: name, Size: total, URL: srv.URL}, "", "", ModeA)
+		id, err := m.Submit(protocol.LinkResult{FID: name, FileName: name, Size: total, URL: drip.URL}, "", "", ModeA)
 		if err != nil {
 			t.Fatalf("Submit(%s): %v", name, err)
 		}
@@ -683,7 +1006,7 @@ func TestManagerClose(t *testing.T) {
 	idQ1 := submit("cl-q1.bin")                 // 排队在信号量上
 	idQ2 := submit("cl-q2.bin")
 
-	m.Close() // 返回即：全部任务已取消、全部 goroutine 已退出
+	m.Close() // 返回即：全部任务已停、全部 goroutine 已退出、断点全保留
 
 	for _, id := range []string{idR, idQ1, idQ2} {
 		p, err := m.Get(id)
@@ -694,11 +1017,17 @@ func TestManagerClose(t *testing.T) {
 			t.Fatalf("Close 后 %s State=%s, want canceled（Close 应已等齐 goroutine）", id, p.State)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "cl-r.bin")); !os.IsNotExist(err) {
-		t.Errorf("Close 取消运行中任务应删半成品: %v", err)
+	// E6 翻转：半成品保留（Close 不删断点——删除只属于用户显式 Cancel）。
+	dest := filepath.Join(dir, "cl-r.bin")
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatalf("Close 应保留半成品 dest: %v", err)
+	}
+	qm, err := LoadQMeta(dest + ".qmeta")
+	if err != nil {
+		t.Fatalf("Close 应保留断点 .qmeta: %v", err)
 	}
 
-	if _, err := m.Submit(protocol.LinkResult{FID: "x", FileName: "x.bin", Size: total, URL: srv.URL}, "", "", ModeA); !errors.Is(err, ErrClosed) {
+	if _, err := m.Submit(protocol.LinkResult{FID: "x", FileName: "x.bin", Size: total, URL: drip.URL}, "", "", ModeA); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Close 后 Submit 应报 ErrClosed, got %v", err)
 	}
 	m.Close() // 幂等：二次 Close 不挂不炸
@@ -707,6 +1036,36 @@ func TestManagerClose(t *testing.T) {
 	if p, _ := m.Get(idQ1); p.State != "canceled" {
 		t.Fatalf("Close 后 Retry 不应复活: State=%s", p.State)
 	}
+
+	// 重启续传证明（D9/G4）：新 Manager 同目录 Submit，从保留断点无损续传
+	// （每个请求都从对应片的盘上断点 S+W 之后开始——不重复下载任何字节）。
+	var sum int64
+	for _, w := range qm.W {
+		sum += w
+	}
+	if sum == 0 {
+		t.Fatalf("布置前提失效：Close 时任务应有非零断点")
+	}
+	segs := Plan(total, 4)
+	fast, recFast := newRangeServer(t, data)
+	m2 := NewManager(Config{Threads: 4, MaxConcurrentTasks: 1, DestDir: dir}, nil)
+	m2.taskTune = fastTune
+	id2, err := m2.Submit(protocol.LinkResult{FID: "cl-r", FileName: "cl-r.bin", Size: total, URL: fast.URL}, "", "", ModeA)
+	if err != nil {
+		t.Fatalf("重启 Submit: %v", err)
+	}
+	waitForState(t, m2, id2, "done", 60*time.Second)
+	mustEqualFile(t, dest, data)
+	for _, rq := range recFast.snapshot() {
+		idx := 0
+		for idx+1 < len(segs) && segs[idx+1].Start <= rq[0] {
+			idx++
+		}
+		if rq[0] < segs[idx].Start+qm.W[idx] {
+			t.Errorf("重启后重下了已写字节（片 %d 断点 %d, 请求起点 %d）", idx, qm.W[idx], rq[0]-segs[idx].Start)
+		}
+	}
+	m2.Close()
 }
 
 // TestProgressThrottle 进度事件节流：500ms 节流（采样 200ms 不变，测试

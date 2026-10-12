@@ -192,7 +192,8 @@ func (t *Task) mergeLoopB(ctx context.Context, next int, inPart int64, workersDo
 		return nil
 	}
 	// 只追加（§3.5 3）：目标文件从 0 连续增长。恢复时 ② 已把混入来路不明
-	// 字节的尾部截回片边界，O_APPEND 起点即合法前缀末尾。
+	// 字节的尾部截回片边界，O_APPEND 起点即合法前缀末尾；全新开始（无
+	// 有效 .qmeta）的旧 dest 残留由 Manager 起跑前清除（C1 最终审查）。
 	dest, err := os.OpenFile(t.Dest, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		return fmt.Errorf("feiwu: 合并线程打开目标文件失败: %w", err)

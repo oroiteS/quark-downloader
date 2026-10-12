@@ -49,7 +49,7 @@ const (
 // Config Manager 装配配置（设计 G5：零值可用）。
 // 零值默认在 NewManager 规范化：Threads 32 / ModeA / 3 任务。
 type Config struct {
-	Threads            int    // 单文件并发档位（多任务预算分配 AllocateBudget 归上层 Web API，本层单任务直用）
+	Threads            int    // 单文件并发档位。多任务同时跑时，各任务档位应由上层用 AllocateBudget 按 §3.13 预算分配后传入（引擎 Manager 不自动接线）——系列 3 Web API 接线
 	Mode               Mode   // 默认落盘模式（Submit 的 mode 参数逐文件生效）
 	MaxConcurrentTasks int    // 同时在跑的任务数上限
 	DestDir            string // 下载根目录；dest = DestDir + relDir + FileName（G11 一文件一任务）
@@ -132,6 +132,8 @@ type managedTask struct {
 	refreshes int       // §2.10 刷新计数（<5）
 	paused    bool      // 暂停意愿（loop 循环顶与 Pause/Resume 读写）
 	canceled  bool      // 取消意愿（排队期/刷新窗口也生效——Scheduler 无 ctx 的补偿，T13）
+	shutdown  bool      // Close 停机意愿（E6 最终审查）：终态收尾但保留断点
+	cancelGen int       // 取消链代际（E8 最终审查）：deferred 清空仅同代生效
 
 	th eventThrottle // 进度事件节流器（跨 attempt 共享，防切换瞬间双发）
 }
@@ -241,18 +243,21 @@ func (m *Manager) Submit(lr protocol.LinkResult, relDir, cookieStr string, mode 
 		refresher: refresher,
 		phase:     phaseQueued,
 	}
-	mt.task = m.buildAttempt(mt, lr.URL) // 排队期 Get 可报 pending/已有断点的进度
+	mt.task, _ = m.buildAttempt(mt, lr.URL) // 排队期 Get 可报 pending/已有断点的进度（预览不清残留，C1）
 	m.mu.Lock()
 	if m.closed { // 注册临界区内复查（Close 可能与 Submit 并发；F2）
 		m.mu.Unlock()
 		m.sched.UnlockDest(absLower, true) // owned：Submit 成功才持有，失败路径手动归还
 		return "", ErrClosed
 	}
+	m.wg.Add(1) // I5（最终审查）：Add 与 closed 复查同处临界区——Close 的
+	// closed=true 与 wg.Wait 同锁序，注册成功必被等齐。原实现 Add 在
+	// Unlock 后，存在「已注册、未计数」的纳秒窗口：Close 的 Wait 可从中
+	// 穿过，返回后任务 goroutine 才起跑，等齐契约破产。
 	m.tasks[id] = mt
 	m.evictLocked() // F2：注册后过限先淘汰终态（新条目必存活）
 	m.mu.Unlock()
 
-	m.wg.Add(1) // 先 Add 后 go：Close 的 wg.Wait 不漏计（F2）
 	go m.loop(mt)
 	return id, nil
 }
@@ -261,22 +266,29 @@ func (m *Manager) Submit(lr protocol.LinkResult, relDir, cookieStr string, mode 
 // newTask（Plan + 引擎客户端 + 生产常数）→ .qmeta 恢复对账（§3.6/§2.10
 // 无损续传——自愈换链与暂停续传都从这里读回 W）→ NewGate 真闸门（Ruling
 // E1：替换 newTask 的 noOpGate 占位）→ 节流事件钩子。
-func (m *Manager) buildAttempt(mt *managedTask, url string) *Task {
+// 第二返回值 fresh=true 表示**未发生有效恢复**（LoadQMeta 失败或对账
+// ok=false 丢弃 → 全新开始，C1 最终审查）——模式 B 全新开始前须由调用方
+// 先清 dest/.qmeta/.qparts 残留（见 loop；Submit 期的预览调用不清——
+// 排队/取消都不该动用户旧文件）。
+func (m *Manager) buildAttempt(mt *managedTask, url string) (*Task, bool) {
 	tk := newTask(mt.id, mt.dest, url, mt.cookie, m.cfg.Threads, mt.lr.Size)
 	if mt.mode == ModeB {
 		tk.modeB = true
 		tk.partsDir = mt.dest + ".qparts"
 	}
+	fresh := true
 	if qm, err := LoadQMeta(tk.qmetaPath()); err == nil {
 		if mt.mode == ModeB {
 			if w, merged, inHead, ok := ReconcileB(mt.dest, tk.partsDir, qm, tk.Segs); ok {
 				tk.W = w
 				tk.mergeNext, tk.mergeInPart = merged, inHead
 				tk.done.Store(sumW(w))
+				fresh = false
 			}
 		} else if w, ok := ReconcileA(mt.dest, qm, tk.Segs); ok {
 			tk.W = w
 			tk.done.Store(sumW(w))
+			fresh = false
 		}
 		// 对账不匹配（total/划分变了）→ 丢弃元数据全新开始（§3.6）。
 	}
@@ -286,7 +298,7 @@ func (m *Manager) buildAttempt(mt *managedTask, url string) *Task {
 	if m.taskTune != nil {
 		m.taskTune(tk)
 	}
-	return tk
+	return tk, fresh
 }
 
 // progressHook 返回 Task.onEvent 的节流包装（500ms；Task 采样 200ms 不变，
@@ -349,9 +361,13 @@ func (m *Manager) loop(mt *managedTask) {
 	// Cancel 经 mt.cancel 掐根，刷新窗口内同样可达（旧实现刷新用
 	// context.Background 且无超时，回调挂起 = 任务 goroutine 永久阻塞且
 	// 持有 sem 槽位，Cancel 掐不到）。
+	// 代际 token（Ruling E8 最终审查）：Resume/Retry 起新 loop 与旧 loop
+	// 的收尾并行——旧 loop 的 deferred 清空若无条件执行，会覆盖新 loop
+	// 注册的取消链（Cancel 从此读到 nil 只能设标志，在跑 attempt 掐不断）。
+	// clearCancel 仅在同代时生效。
 	runCtx, runCancel := context.WithCancel(context.Background())
-	mt.setCancel(runCancel)
-	defer func() { runCancel(); mt.setCancel(nil) }()
+	gen := mt.setCancelGen(runCancel)
+	defer func() { runCancel(); mt.clearCancel(gen) }()
 
 	url := mt.lr.URL
 	for {
@@ -359,14 +375,52 @@ func (m *Manager) loop(mt *managedTask) {
 			m.finishCanceled(mt)
 			return
 		}
+		if mt.isShutdown() { // E6：Close 停机意愿——终态收尾但保留断点
+			m.finishKept(mt)
+			return
+		}
 		if mt.isPaused() {
 			m.suspend(mt)
 			return
 		}
 
-		tk := m.buildAttempt(mt, url)
+		tk, fresh := m.buildAttempt(mt, url)
+		if fresh && mt.mode == ModeB {
+			// C1（最终审查）：模式 B 全新开始先清 dest/.qmeta/.qparts 残留。
+			// 合并线程 O_APPEND 只追加：.qmeta 缺失/损坏/total 不符（对账
+			// 丢弃→全新开始）而 dest 已有内容时（典型：同名不同大小的新
+			// 文件），新分片会追加到旧文件尾部——dest 永远无法等于 total
+			// 且旧文件被破坏，Retry 持续错位；旧分片残留同理混入超长字节。
+			// 断点既已判不可用（.qmeta 是模式 B 唯一断点凭证），残留对新
+			// plan 全是毒药。选 Remove 而非 Truncate(0)：全新开始=新文件，
+			// 从零创建语义更诚实（Truncate(0) 保留旧 inode 反而暗示延续）。
+			_ = os.Remove(mt.dest)
+			_ = os.Remove(mt.dest + ".qmeta")
+			_ = os.RemoveAll(mt.dest + ".qparts")
+		}
 		mt.setRunning(tk, url)
 		ctx, cancel := context.WithCancel(runCtx) // attempt 从任务根派生（用户取消 = 外部令牌语义不变）
+
+		// E8 复查（Ruling E8 最终审查）：setRunning 之后立即复查控制意愿。
+		// buildAttempt 窗口（loop 顶检查已过、runX 未起）内到达的
+		// Pause/Cancel 此前无人消费——Pause 只设了意愿（或注入到已退出
+		// 的旧 attempt），Cancel 对尚未起跑的 attempt 无从掐起；不复查就
+		// 整跑到底，控制指令丢失。
+		if mt.isCanceled() {
+			cancel()
+			m.finishCanceled(mt)
+			return
+		}
+		if mt.isShutdown() { // E6：Close 停机——终态收尾但保留断点
+			cancel()
+			m.finishKept(mt)
+			return
+		}
+		if mt.isPaused() {
+			cancel()
+			m.suspend(mt)
+			return
+		}
 
 		var err error
 		if mt.mode == ModeB {
@@ -383,6 +437,14 @@ func (m *Manager) loop(mt *managedTask) {
 			m.finish(mt, "done", nil)
 			return
 		case errors.Is(err, ErrPaused):
+			if mt.isCanceled() { // 用户取消优先于停机/挂起（显式删除语义）
+				m.finishCanceled(mt)
+				return
+			}
+			if mt.isShutdown() { // E6：Close 注入的挂起类收尾——保留断点终态
+				m.finishKept(mt)
+				return
+			}
 			m.suspend(mt)
 			return
 		case isCancellation(err), mt.isCanceled():
@@ -392,6 +454,14 @@ func (m *Manager) loop(mt *managedTask) {
 		}
 		if m.maybeRefresh(runCtx, mt, &url, err) {
 			continue // 新 URL 重跑整个下载尝试；W 从 .qmeta 读回无损续传
+		}
+		if mt.isShutdown() { // E6：Close 掐断刷新窗口（refresher ctx 已随根死亡）
+			m.finishKept(mt)
+			return
+		}
+		if mt.isCanceled() { // I3（最终审查）：刷新窗口内用户取消——终态按取消记
+			m.finishCanceled(mt)
+			return
 		}
 		m.finish(mt, "error", err)
 		return
@@ -452,6 +522,14 @@ func (m *Manager) finishCanceled(mt *managedTask) {
 	m.finish(mt, "canceled", context.Canceled)
 }
 
+// finishKept E6（最终审查，Ruling E6）：Close 停机收尾——终态 canceled 但
+// **保留全部断点**（不删 dest/.qmeta/分片；删除只属于用户显式 Cancel 的
+// finishCanceled）。终态错误帧用 ErrClosed，web 层可区分「停机保留」与
+// 「用户取消删除」。
+func (m *Manager) finishKept(mt *managedTask) {
+	m.finish(mt, "canceled", ErrClosed)
+}
+
 // suspend 暂停挂起：goroutine 退出（让出信号量），dest 登记保持到终态
 // （暂停期间同路径仍互斥），等 Resume 重新排队。
 func (m *Manager) suspend(mt *managedTask) {
@@ -485,11 +563,16 @@ func (m *Manager) Pause(id string) {
 }
 
 // Resume 恢复：清暂停意愿 → 重新排队（buildAttempt 从 .qmeta 无损续传）。
+// 锁序 m.mu → mt.mu（与 evictLocked 一致）；closed 复查与 wg.Add 同处
+// m.mu 临界区（I5 同款，Close 等齐契约——不容「已置 Queued、未计数」的
+// 窗口：Close 的 closed=true 与 wg.Wait 同锁序，二者必互斥）。
 func (m *Manager) Resume(id string) {
-	if m.isClosed() { // F2：Close 后不复活（复活职责在 web 层 §6.2 持久化）
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed { // F2：Close 后不复活（复活职责在 web 层 §6.2 持久化）
 		return
 	}
-	mt := m.lookup(id)
+	mt := m.tasks[id]
 	if mt == nil {
 		return
 	}
@@ -539,12 +622,15 @@ func (m *Manager) Cancel(id string) {
 // Retry 重试：error/canceled/done 终态或 paused 挂起态复活（error 态断点
 // 保留在盘，buildAttempt 无损续传；canceled/done 态盘上已无断点则全新
 // 开始）。运行中/排队中无效（记日志）。终态重试需重新 TryLockDest
-// （路径可能已被其他任务占用）。
+// （路径可能已被其他任务占用）。closed 复查与 wg.Add 同处 m.mu 临界区
+// （I5 同款，Close 等齐契约）。
 func (m *Manager) Retry(id string) {
-	if m.isClosed() { // F2：Close 后不复活（复活职责在 web 层 §6.2 持久化）
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed { // F2：Close 后不复活（复活职责在 web 层 §6.2 持久化）
 		return
 	}
-	mt := m.lookup(id)
+	mt := m.tasks[id]
 	if mt == nil {
 		return
 	}
@@ -564,6 +650,7 @@ func (m *Manager) Retry(id string) {
 		}
 	}
 	mt.canceled = false
+	mt.shutdown = false // E6：清 Close 停机意愿（终态复活重新起跑）
 	mt.refreshes = 0
 	mt.phase = phaseQueued
 	mt.mu.Unlock()
@@ -571,12 +658,16 @@ func (m *Manager) Retry(id string) {
 	go m.loop(mt)
 }
 
-// Close 关闭 Manager（F2 审查）：① 取消所有未终态任务（运行/排队经取消
-// 链与标志，暂停由 finishCanceled 兜底删半成品——与逐个 Cancel 等价）；
-// ② 等待全部任务 goroutine（loop）退出后才返回——runX 内部的
-// worker/监视/合并线程均由 runX 自行 join，loop 退出即全链收口；
-// ③ 幂等——重复调用直接返回。Close 后 Submit 报 ErrClosed，Resume/Retry
-// 不再复活任务；Get 对未被淘汰的登记条目仍可用。
+// Close 关闭 Manager（F2 审查 + E6 最终审查）：**停止全部任务并保留断点**。
+// 运行中 → 挂起类收尾（注入 ErrPaused → runX 保留分支；先记错误再掐根，
+// ErrPaused 抢占 firstErr 使终判不落删除分支）置终态；排队 → loop 顶 /
+// E8 设置后复查 shutdown 意愿自行收尾（goroutine 可能尚阻塞在信号量上，
+// 等槽位释放）；暂停 → 直接置终态（无 goroutine）。任何路径都不删
+// dest/.qmeta/分片——删除只属于用户显式 Cancel（D9/G4 重启续传愿景：
+// 进程退出保留断点，重启后 web 层从 .qmeta 复活续传）。随后等待全部
+// 任务 goroutine（loop）退出后才返回；幂等——重复调用直接返回。Close 后
+// Submit 报 ErrClosed，Resume/Retry 不再复活任务；Get 对未被淘汰的登记
+// 条目仍可用。
 func (m *Manager) Close() {
 	m.mu.Lock()
 	if m.closed {
@@ -591,9 +682,36 @@ func (m *Manager) Close() {
 	m.mu.Unlock()
 
 	for _, mt := range mts {
-		m.Cancel(mt.id)
+		mt.mu.Lock()
+		if mt.phase == phaseTerminal {
+			mt.mu.Unlock()
+			continue
+		}
+		mt.shutdown = true // E6 停机意愿：loop 各检查点消费
+		phase, tk, cancel := mt.phase, mt.task, mt.cancel
+		mt.mu.Unlock()
+		switch phase {
+		case phaseRunning:
+			// 挂起类收尾（同 Pause 机制）：ErrPaused 先记 firstErr（保留
+			// 分支锚点）再掐链；cancel 掐根让刷新窗口快解（在跑 attempt
+			// 因 firstErr=ErrPaused 先占，finalizeCleanup 不落删除分支）。
+			if tk != nil {
+				if tk.watchdog != nil {
+					tk.watchdog.SetPaused(true) // 收尾窗口内也不判停滞
+				}
+				tk.fail(ErrPaused)
+			}
+			if cancel != nil {
+				cancel()
+			}
+		case phasePaused:
+			m.finishKept(mt) // 无 goroutine：直接终态保留
+		case phaseQueued:
+			// loop goroutine 自行收尾：顶检查/E8 复查见 shutdown 即
+			// finishKept（可能尚阻塞在信号量上，等运行任务释放槽位）。
+		}
 	}
-	m.wg.Wait() // 全部 loop 退出（Add 先于 go loop，无漏计、无漏等）
+	m.wg.Wait() // 全部 loop 退出（Add 与注册/复活同临界区，无漏计、无漏等）
 }
 
 // isClosed Close 状态查询（Submit/Resume/Retry 入口快速失败）。
@@ -677,6 +795,12 @@ func (mt *managedTask) isPaused() bool {
 	return mt.paused
 }
 
+func (mt *managedTask) isShutdown() bool {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	return mt.shutdown
+}
+
 func (mt *managedTask) setRunning(tk *Task, url string) {
 	mt.mu.Lock()
 	mt.task, mt.phase = tk, phaseRunning
@@ -684,9 +808,24 @@ func (mt *managedTask) setRunning(tk *Task, url string) {
 	mt.mu.Unlock()
 }
 
-func (mt *managedTask) setCancel(c context.CancelFunc) {
+// setCancelGen 注册新代取消链（代际自增）并返回代号（E8 最终审查）：
+// Resume/Retry 起新 loop 与旧 loop 收尾并行，链注册必须带代际。
+func (mt *managedTask) setCancelGen(c context.CancelFunc) int {
 	mt.mu.Lock()
+	mt.cancelGen++
 	mt.cancel = c
+	mt.mu.Unlock()
+	return mt.cancelGen
+}
+
+// clearCancel 仅当仍是指定代时清空取消链（E8 最终审查）：旧代 loop 的
+// deferred 清空不得覆盖新代 loop 注册的链——否则 Cancel 读到 nil 只能
+// 设标志，在跑 attempt 掐不断，控制面丢失。
+func (mt *managedTask) clearCancel(gen int) {
+	mt.mu.Lock()
+	if mt.cancelGen == gen {
+		mt.cancel = nil
+	}
 	mt.mu.Unlock()
 }
 

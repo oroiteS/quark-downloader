@@ -60,7 +60,7 @@ func TestReconcileARejectsBadMeta(t *testing.T) {
 	total, segs, w := reconcileFixture()
 	wShort := w[:len(w)-1]
 	wLong := append(slices.Clone(w), 0)
-	segBad := slices.Clone(segs) // 尾片不动（total 仍符）、片数仍符，
+	segBad := slices.Clone(segs)      // 尾片不动（total 仍符）、片数仍符，
 	segBad[0].End = segBad[0].End + 1 // 但首片边界被改 → 与 layout 重推划分不符
 
 	cases := []struct {

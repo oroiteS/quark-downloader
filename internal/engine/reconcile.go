@@ -85,11 +85,14 @@ func ReconcileA(dest string, m *QMeta, segs []Segment) (w []int64, ok bool) {
 //
 // 返回对账后的每片已写字节 w、合并进度起点 mergedCount（第一个未合并
 // 片）/mergedInHead（该片已合并字节）与 ok。ok=false 表示元数据与当前
-// plan 不可匹配或磁盘操作失败：w 为 nil、磁盘不被改动，调用方丢弃一切
-// 全新开始（分片目录残留由新一轮下载按文件长度覆盖/合并线程删除）。
-// ok=true 时调用方装配 runB：W=w、done=Σw、mergeNext=mergedCount、
-// mergeInPart=mergedInHead（§3.6「状态恢复后的进度起点」——已合并片
-// 在 ④ 被置 W=片大小，故 Σw 已含已合并字节）。
+// plan 不可匹配或磁盘操作失败：w 为 nil，但**磁盘不保证未被改动**——
+// M7（最终审查）：①步病态超长残留可能已截回 total、②步尾部对账截断、
+// ③步分片截断都可能先于失败点发生（一律只缩不扩，绝无扩大）。全新
+// 开始路径（Manager.buildAttempt 判定 fresh 后清残留，C1）会重新规划，
+// 不依赖 ok=false 时磁盘保持原状。ok=true 时调用方装配 runB：W=w、
+// done=Σw、mergeNext=mergedCount、mergeInPart=mergedInHead（§3.6「状态
+// 恢复后的进度起点」——已合并片在 ④ 被置 W=片大小，故 Σw 已含已合并
+// 字节）。
 func ReconcileB(dest, partsDir string, m *QMeta, segs []Segment) (w []int64, mergedCount int, mergedInHead int64, ok bool) {
 	if !qmetaMatchesPlan(m, segs) {
 		return nil, 0, 0, false
