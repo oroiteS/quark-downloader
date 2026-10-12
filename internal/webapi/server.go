@@ -129,6 +129,14 @@ func (a *App) buildRouter() *gin.Engine {
 	// 任务创建（Task 9，tasks.go：目录展开/预算分配/自愈回调）。
 	api.POST("/tasks", a.handleCreateTasks)
 
+	// 任务查询与控制（Task 10，tasks.go：列表聚合 + pause/resume/
+	// cancel/retry，retry 对被淘汰任务重走创建路径复活）。
+	api.GET("/tasks", a.handleListTasks)
+	api.POST("/tasks/:id/pause", a.handleTaskPause)
+	api.POST("/tasks/:id/resume", a.handleTaskResume)
+	api.POST("/tasks/:id/cancel", a.handleTaskCancel)
+	api.POST("/tasks/:id/retry", a.handleTaskRetry)
+
 	registerStatic(r)
 	r.NoRoute(func(c *gin.Context) {
 		// /api（含 /api/ 前缀子路径）的未匹配路径保持 JSON 语义（客户端

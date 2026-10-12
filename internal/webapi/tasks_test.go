@@ -20,6 +20,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,13 +35,16 @@ import (
 
 // fakeManager taskManager 的假实现：记录每次 Submit 的完整参数（档位、
 // Refresher 是否注入等），id 依次发 t1/t2/…；submitF 可程序化注入错误
-// （如模拟同路径互斥拒绝）。
+// （如模拟同路径互斥拒绝）。Task 10 扩展：gets 模拟 Get 快照（缺省
+// ErrTaskNotFound=已淘汰/不存在），控制面调用记录进 calls（"pause:t1"）。
 type fakeManager struct {
 	mu      sync.Mutex
 	submits []fakeSubmitCall
 	nextID  int
 	closed  int
 	submitF func(call fakeSubmitCall) (string, error)
+	gets    map[string]engine.Progress // id → Get 快照；无条目 = ErrTaskNotFound
+	calls   []string                   // 控制调用记录（action:id）
 }
 
 // fakeSubmitCall 一次 Submit 调用的完整快照。
@@ -82,6 +87,35 @@ func (f *fakeManager) closeCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.closed
+}
+
+// Get 模拟引擎查询：gets 有条目返回快照，否则 wrap ErrTaskNotFound
+// （与 engine.Manager.Get 同语义——淘汰/不存在）。
+func (f *fakeManager) Get(id string) (engine.Progress, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p, ok := f.gets[id]; ok {
+		return p, nil
+	}
+	return engine.Progress{}, fmt.Errorf("%w: %s", engine.ErrTaskNotFound, id)
+}
+
+func (f *fakeManager) Pause(id string)  { f.control("pause", id) }
+func (f *fakeManager) Resume(id string) { f.control("resume", id) }
+func (f *fakeManager) Cancel(id string) { f.control("cancel", id) }
+func (f *fakeManager) Retry(id string)  { f.control("retry", id) }
+
+func (f *fakeManager) control(action, id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, action+":"+id)
+}
+
+// controlCalls 控制调用快照（含顺序）。
+func (f *fakeManager) controlCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
 }
 
 func (f *fakeManager) snapshot() []fakeSubmitCall {
@@ -483,7 +517,9 @@ func TestCreateTasksSkipsDuplicateDest(t *testing.T) {
 	fm := &fakeManager{}
 	fm.submitF = func(call fakeSubmitCall) (string, error) {
 		if call.LR.FID == "fy" {
-			return "", fmt.Errorf("feiwu: 同一文件正在下载中: %s", filepath.Join("dl", "dup.txt"))
+			// Task 10 起 engine 以 wrap ErrDestBusy 返回（文案不变），
+			// webapi 判定走 errors.Is——fake 同形注入。
+			return "", fmt.Errorf("%w: %s", engine.ErrDestBusy, filepath.Join("dl", "dup.txt"))
 		}
 		return "t1", nil
 	}
@@ -902,4 +938,370 @@ func TestCreateTasksSkipsExistingCompleteFile(t *testing.T) {
 			t.Fatalf("落盘 = %+v, 期望 {Exists:false}（保守路径不标注）", saved)
 		}
 	})
+}
+
+// ---- ⑩ Task 10：GET /api/tasks 列表 DTO 字段映射 ----
+
+// TestListTasksDTO 四类条目逐字段：①引擎在册（running，进度/速度/ETA/
+// mode 从 TaskCtx）；②已存在终态（Exists，state="exists"，done=size，
+// 合成 id "ctx:"+fid）；③引擎淘汰且可重取（needs_reparse=true）；
+// ④引擎淘汰且不可重取（state="finished"）。
+func TestListTasksDTO(t *testing.T) {
+	paths := taskTestPaths(t)
+	settings := taskTestSettings(filepath.Join(paths.DataDir, "dl"))
+	fm := &fakeManager{
+		gets: map[string]engine.Progress{
+			"t1": {Done: 400, Total: 777, SpeedBPS: 1000, State: "running"},
+		},
+	}
+	app := newTasksTestApp(t, &fakeUpstream{}, fm, settings, paths)
+	base := time.Now().Unix()
+	store.SaveTasks(paths, []store.TaskCtx{
+		{EngineID: "t1", FileName: "a.bin", FID: "f1", RelDir: "Saved",
+			Dest: filepath.Join(settings.DestDir, "Saved", "a.bin"), Size: 777, Mode: "b", CreatedAt: base},
+		{EngineID: "", FileName: "e.bin", FID: "f2", RelDir: "",
+			Dest: filepath.Join(settings.DestDir, "e.bin"), Size: 999, Exists: true, Mode: "a", CreatedAt: base},
+		{EngineID: "t3", FileName: "n.bin", FID: "f3", FromShare: true,
+			PwdID: "pw", Passcode: "pc", Token: "tok3", Stoken: "st3",
+			Dest: filepath.Join(settings.DestDir, "n.bin"), Size: 55, Mode: "a", CreatedAt: base},
+		{EngineID: "t4", FileName: "z.bin", FID: "f4", FromShare: true, // 缺 pwd/passcode/token → CanRefresh=false
+			Dest: filepath.Join(settings.DestDir, "z.bin"), Size: 44, Mode: "a", CreatedAt: base},
+	})
+
+	w := doReq(t, app.Router(), http.MethodGet, "/api/tasks", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d, 期望 200（body=%s）", w.Code, w.Body)
+	}
+	var list []taskDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("响应不是 JSON 数组: %v（body=%s）", err, w.Body)
+	}
+	if len(list) != 4 {
+		t.Fatalf("条目数 = %d, 期望 4（got=%+v）", len(list), list)
+	}
+
+	// ① 引擎在册：进度字段来自 Get 快照，其余来自 TaskCtx。
+	d1 := list[0]
+	if d1.ID != "t1" || d1.FileName != "a.bin" || d1.RelDir != "Saved" || d1.Size != 777 {
+		t.Fatalf("t1 标识字段 = %+v", d1)
+	}
+	if d1.State != "running" || d1.Done != 400 || d1.SpeedBPS != 1000 {
+		t.Fatalf("t1 进度字段 = {state:%q done:%d speed:%v}", d1.State, d1.Done, d1.SpeedBPS)
+	}
+	if want := int64(377); d1.EtaMS != want { // (777-400)/1000B/s = 377ms
+		t.Fatalf("t1 eta_ms = %d, 期望 %d", d1.EtaMS, want)
+	}
+	if d1.Mode != "b" || d1.CreatedAt != base || d1.NeedsReparse {
+		t.Fatalf("t1 上下文字段 = {mode:%q created:%d reparse:%v}", d1.Mode, d1.CreatedAt, d1.NeedsReparse)
+	}
+
+	// ② 已存在终态：state="exists"、done=size、合成 id、速度/ETA 为 0。
+	d2 := list[1]
+	if d2.ID != "ctx:f2" || d2.State != "exists" || d2.Done != 999 || d2.Size != 999 {
+		t.Fatalf("exists 条目 = %+v", d2)
+	}
+	if d2.SpeedBPS != 0 || d2.EtaMS != 0 || d2.NeedsReparse || d2.Mode != "a" {
+		t.Fatalf("exists 条目字段 = {speed:%v eta:%d reparse:%v mode:%q}", d2.SpeedBPS, d2.EtaMS, d2.NeedsReparse, d2.Mode)
+	}
+
+	// ③ 淘汰且可重取：needs_reparse=true。
+	d3 := list[2]
+	if d3.ID != "t3" || !d3.NeedsReparse || d3.State != "needs_reparse" {
+		t.Fatalf("needs_reparse 条目 = %+v（期望可重取的淘汰任务）", d3)
+	}
+	if d3.Size != 55 || d3.FileName != "n.bin" {
+		t.Fatalf("needs_reparse 条目上下文 = {size:%d name:%q}", d3.Size, d3.FileName)
+	}
+
+	// ④ 淘汰且不可重取：历史终态，不标 needs_reparse。
+	d4 := list[3]
+	if d4.ID != "t4" || d4.State != "finished" || d4.NeedsReparse {
+		t.Fatalf("finished 条目 = %+v（期望不可重取的历史终态）", d4)
+	}
+}
+
+// TestListTasksEmpty 无任务时返回空数组（非 null）。
+func TestListTasksEmpty(t *testing.T) {
+	paths := taskTestPaths(t)
+	app := newTasksTestApp(t, &fakeUpstream{}, &fakeManager{}, taskTestSettings(filepath.Join(paths.DataDir, "dl")), paths)
+
+	w := doReq(t, app.Router(), http.MethodGet, "/api/tasks", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d, 期望 200", w.Code)
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != "[]" {
+		t.Fatalf("空列表响应 = %s, 期望 []", got)
+	}
+}
+
+// ---- ⑪ pause/resume/cancel/retry 状态流转 ----
+
+// TestTaskControlDispatch 引擎在册任务：四个控制端点 200 且调用按序到达
+// manager（retry 对在册任务=引擎 Retry）；未知 id（引擎与 TaskCtx 双
+// miss）→ 404 task_not_found。
+func TestTaskControlDispatch(t *testing.T) {
+	paths := taskTestPaths(t)
+	settings := taskTestSettings(filepath.Join(paths.DataDir, "dl"))
+	fm := &fakeManager{
+		gets: map[string]engine.Progress{
+			"t1": {Done: 1, Total: 10, State: "running"},
+		},
+	}
+	app := newTasksTestApp(t, &fakeUpstream{}, fm, settings, paths)
+
+	post := func(path string) *httptest.ResponseRecorder {
+		return doReq(t, app.Router(), http.MethodPost, path, nil)
+	}
+	for _, action := range []string{"pause", "resume", "cancel", "retry"} {
+		w := post("/api/tasks/t1/" + action)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s 状态码 = %d, 期望 200（body=%s）", action, w.Code, w.Body)
+		}
+		var body struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body.Status != "ok" {
+			t.Fatalf("%s 响应 = %s, 期望 {status:ok}", action, w.Body)
+		}
+	}
+	want := []string{"pause:t1", "resume:t1", "cancel:t1", "retry:t1"}
+	if got := fm.controlCalls(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("控制调用 = %v, 期望 %v", got, want)
+	}
+
+	// 未知 id：引擎 miss + TaskCtx miss → 404。
+	w := post("/api/tasks/t99/pause")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("未知任务状态码 = %d, 期望 404（body=%s）", w.Code, w.Body)
+	}
+	var eb struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &eb); err != nil || eb.Error.Code != "task_not_found" {
+		t.Fatalf("404 响应 = %s, 期望 code=task_not_found", w.Body)
+	}
+}
+
+// ---- ⑫ needs_reparse 的 409 ----
+
+// TestTaskControlNeedsReparse 引擎淘汰（Get not found）且 TaskCtx 可重取：
+// pause/resume/cancel → 409 {code:"needs_reparse"}（brief 逐字——前端
+// 引导重新解析）；Exists 条目（EngineID 空）不可控 → 404。
+func TestTaskControlNeedsReparse(t *testing.T) {
+	paths := taskTestPaths(t)
+	settings := taskTestSettings(filepath.Join(paths.DataDir, "dl"))
+	app := newTasksTestApp(t, &fakeUpstream{}, &fakeManager{}, settings, paths)
+	store.SaveTasks(paths, []store.TaskCtx{
+		{EngineID: "t3", FileName: "n.bin", FID: "f3", FromShare: true,
+			PwdID: "pw", Passcode: "pc", Dest: filepath.Join(settings.DestDir, "n.bin"), Size: 55, Mode: "a"},
+		{EngineID: "", FileName: "e.bin", FID: "f2", Exists: true,
+			Dest: filepath.Join(settings.DestDir, "e.bin"), Size: 9, Mode: "a"},
+	})
+
+	for _, action := range []string{"pause", "resume", "cancel"} {
+		w := doReq(t, app.Router(), http.MethodPost, "/api/tasks/t3/"+action, nil)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("%s 状态码 = %d, 期望 409（body=%s）", action, w.Code, w.Body)
+		}
+		var eb struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &eb); err != nil || eb.Error.Code != "needs_reparse" {
+			t.Fatalf("%s 响应 = %s, 期望 code=needs_reparse", action, w.Body)
+		}
+	}
+
+	// Exists 条目：EngineID 空，任何 id 都匹配不上 → 404（不可控制）。
+	w := doReq(t, app.Router(), http.MethodPost, "/api/tasks/ctx:f2/pause", nil)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("Exists 条目控制状态码 = %d, 期望 404（body=%s）", w.Code, w.Body)
+	}
+}
+
+// ---- ⑬ 淘汰任务 retry 复活（重走创建路径，Refresher 复活）----
+
+// TestTaskRetryRevivesEvicted 引擎淘汰且可重取的任务 retry：share 先重取
+// stoken（ShareToken）→ 免转存三参取新链 → Submit（mode 从 TaskCtx.Mode
+// 读回、Refresher 注入）→ TaskCtx.EngineID 更新为新 id。子用例：stoken
+// 重取失败 → 409 needs_reparse（如实，绝不静默）；不可重取 → 409；
+// 无 TaskCtx → 404；未登录 → 401。
+func TestTaskRetryRevivesEvicted(t *testing.T) {
+	seed := func() (store.Paths, store.Settings) {
+		paths := taskTestPaths(t)
+		return paths, taskTestSettings(filepath.Join(paths.DataDir, "dl"))
+	}
+
+	t.Run("share 重取 stoken 后复活", func(t *testing.T) {
+		up := &fakeUpstream{
+			stoken: "st-fresh",
+			links:  map[string]string{"f3": "https://d.quark.cn/f3?auth_key=fresh&Expires=9&Signature=s"},
+		}
+		fm := &fakeManager{} // gets 空：t3 已淘汰
+		paths, settings := seed()
+		app := newTasksTestApp(t, up, fm, settings, paths)
+		store.SaveTasks(paths, []store.TaskCtx{
+			{EngineID: "t3", FileName: "n.bin", FID: "f3", FromShare: true,
+				PwdID: "pw", Passcode: "pc", Token: "tok3", Stoken: "st-old",
+				RelDir: "Saved", Dest: filepath.Join(settings.DestDir, "Saved", "n.bin"),
+				Size: 55, Mode: "b", CreatedAt: time.Now().Unix()},
+		})
+
+		w := doReq(t, app.Router(), http.MethodPost, "/api/tasks/t3/retry", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("状态码 = %d, 期望 200（body=%s）", w.Code, w.Body)
+		}
+		var body struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body.TaskID != "t1" {
+			t.Fatalf("响应 = %s, 期望 {task_id:t1}（复活的新引擎 id）", w.Body)
+		}
+
+		subs := fm.snapshot()
+		if len(subs) != 1 {
+			t.Fatalf("Submit %d 次, 期望 1", len(subs))
+		}
+		s := subs[0]
+		if s.LR.URL != up.links["f3"] || s.LR.FileName != "n.bin" || s.LR.Size != 55 {
+			t.Fatalf("Submit LinkResult = %+v, 期望新链+n.bin/55", s.LR)
+		}
+		if s.RelDir != "Saved" || s.Mode != engine.ModeB {
+			t.Fatalf("Submit relDir/mode = %q/%d, 期望 Saved/ModeB（Mode 从 TaskCtx 读回）", s.RelDir, s.Mode)
+		}
+		if s.Threads != settings.Threads {
+			t.Fatalf("Submit threads = %d, 期望 %d（单任务复活取 settings.Threads）", s.Threads, settings.Threads)
+		}
+		if !s.HasRefresh || s.Cookie != "__puus=tok" {
+			t.Fatalf("Submit refresher/cookie = %v/%q, 期望注入/当前 jar", s.HasRefresh, s.Cookie)
+		}
+
+		// 协议链：sharepage/token 重取 + download 用新 stoken 三参。
+		dls := up.downloadRequests()
+		if len(dls) == 0 {
+			t.Fatal("未发出 download 取链请求")
+		}
+		for _, dl := range dls {
+			if dl.Stoken != "st-fresh" {
+				t.Fatalf("download stoken = %q, 期望 st-fresh（重取后的新 stoken）", dl.Stoken)
+			}
+		}
+
+		// TaskCtx 落盘更新：EngineID 换新，其余不变。
+		saved := store.LoadTasks(paths)
+		if len(saved) != 1 || saved[0].EngineID != "t1" || saved[0].Mode != "b" || saved[0].Exists {
+			t.Fatalf("复活后落盘 = %+v, 期望 EngineID=t1 且 Mode/Exists 不变", saved)
+		}
+	})
+
+	t.Run("stoken 重取失败 409 needs_reparse", func(t *testing.T) {
+		up := &fakeUpstream{stoken: ""} // 重取为空 → refresher 报错
+		fm := &fakeManager{}
+		paths, settings := seed()
+		app := newTasksTestApp(t, up, fm, settings, paths)
+		store.SaveTasks(paths, []store.TaskCtx{
+			{EngineID: "t3", FileName: "n.bin", FID: "f3", FromShare: true,
+				PwdID: "pw", Passcode: "pc", Dest: filepath.Join(settings.DestDir, "n.bin"), Size: 55, Mode: "a"},
+		})
+
+		w := doReq(t, app.Router(), http.MethodPost, "/api/tasks/t3/retry", nil)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("状态码 = %d, 期望 409（body=%s）", w.Code, w.Body)
+		}
+		var eb struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &eb); err != nil || eb.Error.Code != "needs_reparse" {
+			t.Fatalf("响应 = %s, 期望 code=needs_reparse（如实，绝不静默）", w.Body)
+		}
+		if n := len(fm.snapshot()); n != 0 {
+			t.Fatalf("Submit %d 次, 期望 0（复活失败不提交）", n)
+		}
+	})
+
+	t.Run("不可重取 409", func(t *testing.T) {
+		paths, settings := seed()
+		app := newTasksTestApp(t, &fakeUpstream{}, &fakeManager{}, settings, paths)
+		store.SaveTasks(paths, []store.TaskCtx{
+			{EngineID: "t4", FileName: "z.bin", FID: "f4", FromShare: true, // 缺重取上下文
+				Dest: filepath.Join(settings.DestDir, "z.bin"), Size: 44, Mode: "a"},
+		})
+		if w := doReq(t, app.Router(), http.MethodPost, "/api/tasks/t4/retry", nil); w.Code != http.StatusConflict {
+			t.Fatalf("状态码 = %d, 期望 409（body=%s）", w.Code, w.Body)
+		}
+	})
+
+	t.Run("无 TaskCtx 404", func(t *testing.T) {
+		paths, settings := seed()
+		app := newTasksTestApp(t, &fakeUpstream{}, &fakeManager{}, settings, paths)
+		if w := doReq(t, app.Router(), http.MethodPost, "/api/tasks/t99/retry", nil); w.Code != http.StatusNotFound {
+			t.Fatalf("状态码 = %d, 期望 404（body=%s）", w.Code, w.Body)
+		}
+	})
+
+	t.Run("未登录 401", func(t *testing.T) {
+		up := &fakeUpstream{
+			stoken: "st-fresh",
+			links:  map[string]string{"f3": "https://d.quark.cn/f3?auth_key=k&Expires=1&Signature=s"},
+		}
+		fm := &fakeManager{}
+		paths, settings := seed()
+		app := newTasksTestApp(t, up, fm, settings, paths)
+		store.SaveTasks(paths, []store.TaskCtx{
+			{EngineID: "t3", FileName: "n.bin", FID: "f3", FromShare: true,
+				PwdID: "pw", Passcode: "pc", Dest: filepath.Join(settings.DestDir, "n.bin"), Size: 55, Mode: "a"},
+		})
+		app.session = nil // 会话不可用=未登录（LoadFromString 是合并语义，清不掉 jar）
+
+		w := doReq(t, app.Router(), http.MethodPost, "/api/tasks/t3/retry", nil)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("状态码 = %d, 期望 401（body=%s）", w.Code, w.Body)
+		}
+		if n := len(fm.snapshot()); n != 0 {
+			t.Fatalf("Submit %d 次, 期望 0（未登录不复活）", n)
+		}
+	})
+}
+
+// ---- ⑭ Mode 落盘读回（裁决 3 接线）----
+
+// TestCreateTasksPersistsMode 创建链落盘 TaskCtx.Mode（"a"/"b"），GET
+// 列表原样透出。
+func TestCreateTasksPersistsMode(t *testing.T) {
+	up := &fakeUpstream{
+		sort: map[string][]protocol.FileEntry{
+			"d0": {{FID: "f1", FileName: "a.bin", Size: 100}},
+		},
+		links: map[string]string{"f1": "https://d.quark.cn/f1?auth_key=k&Expires=1&Signature=s"},
+	}
+	fm := &fakeManager{}
+	paths := taskTestPaths(t)
+	settings := taskTestSettings(filepath.Join(paths.DataDir, "dl"))
+	app := newTasksTestApp(t, up, fm, settings, paths)
+
+	if w := doReq(t, app.Router(), http.MethodPost, "/api/tasks",
+		map[string]any{"source": "drive", "fids": []string{"d0"}, "mode": "b"}); w.Code != http.StatusOK {
+		t.Fatalf("创建状态码 = %d（body=%s）", w.Code, w.Body)
+	}
+	saved := store.LoadTasks(paths)
+	if len(saved) != 1 || saved[0].Mode != "b" {
+		t.Fatalf("落盘 Mode = %+v, 期望 mode=b", saved)
+	}
+
+	w := doReq(t, app.Router(), http.MethodGet, "/api/tasks", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("列表状态码 = %d", w.Code)
+	}
+	var list []taskDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("列表响应: %v（body=%s）", err, w.Body)
+	}
+	if len(list) != 1 || list[0].Mode != "b" {
+		t.Fatalf("列表 mode = %+v, 期望 mode=b 透出", list)
+	}
 }

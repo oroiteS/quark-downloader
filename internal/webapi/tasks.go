@@ -31,13 +31,22 @@ import (
 // （单实例应用前提）；临界区内无网络调用、不碰 authMu——无死锁面。
 var tasksFileMu sync.Mutex
 
-// taskManager 是任务创建消费的最小 manager 面（本包接口化以支持测试
-// fake 注入：直接断言 Submit 收到的 Threads 档位；Task 10 的控制面
-// pause/resume/cancel/retry 在此面上扩展）。*engine.Manager 满足之。
+// taskManager 是 webapi 消费的 manager 面（本包接口化以支持测试
+// fake 注入：直接断言 Submit 收到的 Threads 档位与控制面调用）。
+// *engine.Manager 满足之。
 type taskManager interface {
 	// Submit 提交下载任务（签名与 engine.Manager.Submit 逐字一致）：
-	// 互斥拒绝（TryLockDest 失败）同步返回错误，不排队（§3.13）。
+	// 互斥拒绝（TryLockDest 失败→wrap ErrDestBusy）同步返回错误，
+	// 不排队（§3.13）。
 	Submit(lr protocol.LinkResult, relDir, cookieStr string, mode engine.Mode, opts ...engine.SubmitOpt) (string, error)
+	// Get 查询任务进度快照（不存在/已淘汰返回 wrap ErrTaskNotFound）。
+	Get(id string) (engine.Progress, error)
+	// Pause/Resume/Cancel/Retry 控制面（engine 语义：不存在时静默
+	// no-op；Close 后不复活——复活职责在 webapi 的 retry 复活路径）。
+	Pause(id string)
+	Resume(id string)
+	Cancel(id string)
+	Retry(id string)
 	// Close 停止全部任务并保留断点（E6）；幂等且并发安全。
 	Close()
 }
@@ -75,8 +84,9 @@ type fileItem struct {
 	relDir string // 子树内相对目录（正斜杠；dest 前缀在 Submit 前拼入）
 }
 
-// errDestBusyMark 是引擎同路径互斥拒绝错误的稳定子串（§3.13 文案）；
-// engine 侧无 sentinel，webapi 以子串识别并归一化为对外文案。
+// errDestBusyMark 是引擎同路径互斥拒绝的对外文案（§3.13 逐字）；判定
+// 走 errors.Is(err, engine.ErrDestBusy)（Task 10 起 engine 以 wrap
+// sentinel 返回，文案不变）。
 const errDestBusyMark = "同一文件正在下载中"
 
 // handleCreateTasks POST /api/tasks：见文件头流程。错误映射——请求参数
@@ -219,6 +229,7 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 			RelDir:    relDir,
 			Dest:      absDest(a.settings.DestDir, relDir, it.name),
 			Size:      it.size,
+			Mode:      modeString(mode), // Task 10：DTO mode 与 retry 复活读回
 			CreatedAt: createdAt,
 		}
 		// G11「目标已存在同名完整文件 → 跳过并在任务中标注『已存在』」：
@@ -247,8 +258,8 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 				return
 			}
 			reason := err.Error()
-			if strings.Contains(reason, errDestBusyMark) {
-				reason = errDestBusyMark // §3.13 逐字文案
+			if errors.Is(err, engine.ErrDestBusy) {
+				reason = errDestBusyMark // §3.13 逐字文案（sentinel 判定，非子串匹配）
 			}
 			skipped = append(skipped, skippedItem{it.fid, it.name, reason})
 			continue
@@ -422,4 +433,248 @@ func absDest(destDir, relDir, name string) string {
 		return filepath.Join(destDir, relDir, name) // Abs 失败（极端环境）退化为拼接值
 	}
 	return abs
+}
+
+// ---- Task 10：任务查询与控制端点 ----
+
+// taskDTO GET /api/tasks 响应条目（brief 字段清单逐字；error 字段当前
+// 无稳定来源——引擎 Progress 不携带错误文本，失败详情走 SSE 终态帧
+// （Task 12），此处恒缺省）。
+type taskDTO struct {
+	ID           string  `json:"id"`
+	FileName     string  `json:"file_name"`
+	RelDir       string  `json:"rel_dir"`
+	Size         int64   `json:"size"`
+	State        string  `json:"state"`
+	Done         int64   `json:"done"`
+	SpeedBPS     float64 `json:"speed_bps"`
+	EtaMS        int64   `json:"eta_ms"`
+	Mode         string  `json:"mode"`
+	Error        string  `json:"error,omitempty"`
+	NeedsReparse bool    `json:"needs_reparse,omitempty"`
+	CreatedAt    int64   `json:"created_at"`
+}
+
+// handleListTasks GET /api/tasks：以 tasks.json（TaskCtx）为主表逐条
+// 聚合——引擎在册→进度字段来自 Get 快照；引擎淘汰→CanRefresh 可重取的
+// 标 needs_reparse（前端引导重新解析/retry 复活），否则历史终态
+// finished；Exists 条目→「已存在」终态（合成 id "ctx:"+fid，不可控制）。
+// 纯本地读不查登录；LoadTasks 不持 tasksFileMu（SaveTasks 原子 rename，
+// 读者见旧或新完整文件）。引擎在册但 TaskCtx 缺失（落盘中断的边缘
+// 场景）不透出——无文件名/模式等上下文，且持久化已断需重新创建。
+func (a *App) handleListTasks(c *gin.Context) {
+	ctxs := store.LoadTasks(a.paths)
+	out := make([]taskDTO, 0, len(ctxs))
+	for _, tc := range ctxs {
+		out = append(out, a.taskDTOFromCtx(tc))
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// taskDTOFromCtx 单条 TaskCtx → DTO。
+func (a *App) taskDTOFromCtx(tc store.TaskCtx) taskDTO {
+	d := taskDTO{
+		FileName:  tc.FileName,
+		RelDir:    tc.RelDir,
+		Size:      tc.Size,
+		Mode:      modeLabel(tc.Mode),
+		CreatedAt: tc.CreatedAt,
+	}
+	if tc.Exists { // G11「已存在」终态：done=size，速度/ETA 无意义
+		d.ID = "ctx:" + tc.FID
+		d.State = "exists"
+		d.Done = tc.Size
+		return d
+	}
+	d.ID = tc.EngineID
+	if tc.EngineID == "" { // 残缺条目（落盘中断等）：按历史终态透出
+		d.State = "finished"
+		return d
+	}
+	if a.manager != nil {
+		if p, err := a.manager.Get(tc.EngineID); err == nil {
+			d.State = p.State
+			d.Done = p.Done
+			d.SpeedBPS = p.SpeedBPS
+			d.EtaMS = etaMS(p)
+			return d
+		}
+	}
+	// 引擎 miss（淘汰/重启后未恢复）：D9 语义——可重取标 needs_reparse，
+	// 否则历史终态。
+	if tc.CanRefresh() {
+		d.State = "needs_reparse"
+		d.NeedsReparse = true
+		return d
+	}
+	d.State = "finished"
+	return d
+}
+
+// handleTaskPause/handleTaskResume/handleTaskCancel 控制端点：引擎在册
+// 直接控制（幂等，200）；淘汰/历史任务→409 needs_reparse（brief 逐字，
+// 前端引导重新解析）；双 miss→404。Exists 条目 EngineID 空，任何 id
+// 匹配不上→404（不可控制）。
+func (a *App) handleTaskPause(c *gin.Context) {
+	a.controlTask(c, func(id string) { a.manager.Pause(id) })
+}
+
+func (a *App) handleTaskResume(c *gin.Context) {
+	a.controlTask(c, func(id string) { a.manager.Resume(id) })
+}
+
+func (a *App) handleTaskCancel(c *gin.Context) {
+	a.controlTask(c, func(id string) { a.manager.Cancel(id) })
+}
+
+// controlTask pause/resume/cancel 公共流：Get 探测在册→fn 控制；
+// ErrTaskNotFound→TaskCtx 匹配 EngineID（有→409 needs_reparse，无→
+// 404）。Get 与控制之间有竞态窗口（Get 后被淘汰），控制方法对不存在
+// 任务是静默 no-op——响应 200 但下次列表即见真实状态（最终一致）。
+func (a *App) controlTask(c *gin.Context, fn func(id string)) {
+	if a.manager == nil {
+		writeError(c, http.StatusInternalServerError, "internal", "下载管理器未装配")
+		return
+	}
+	id := c.Param("id")
+	if _, err := a.manager.Get(id); err == nil {
+		fn(id)
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		return
+	}
+	if ctxTaskExists(a.paths, id) {
+		writeError(c, http.StatusConflict, "needs_reparse",
+			"任务已不在下载引擎中（已淘汰或进程重启），需重新解析后重试")
+		return
+	}
+	writeError(c, http.StatusNotFound, "task_not_found", "任务不存在: "+id)
+}
+
+// handleTaskRetry 引擎在册→引擎 Retry（对运行中/排队中幂等无效，记
+// 日志——engine 语义）；淘汰/历史失败→**重走创建路径复活**（brief：
+// 用 TaskCtx 重走创建，Refresher 复活）——可重取的先 makeRefresher
+// 产新链再 Submit（mode 从 TaskCtx.Mode 读回，档位取 settings.Threads
+// ——单任务复活无批量预算可言），TaskCtx.EngineID 换新（持 tasksFileMu
+// 读-改-写，与创建端点同一临界区）；链取不到（stoken 过期等）→409
+// needs_reparse 如实相告（G12 红线：绝不静默）。
+func (a *App) handleTaskRetry(c *gin.Context) {
+	if a.manager == nil {
+		writeError(c, http.StatusInternalServerError, "internal", "下载管理器未装配")
+		return
+	}
+	id := c.Param("id")
+	if _, err := a.manager.Get(id); err == nil {
+		a.manager.Retry(id)
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		return
+	}
+
+	ctxs := store.LoadTasks(a.paths)
+	idx := -1
+	for i := range ctxs {
+		if ctxs[i].EngineID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		writeError(c, http.StatusNotFound, "task_not_found", "任务不存在: "+id)
+		return
+	}
+	tc := ctxs[idx]
+	if !tc.CanRefresh() {
+		writeError(c, http.StatusConflict, "needs_reparse",
+			"任务上下文不足以重取直链（缺分享凭证），需重新解析分享")
+		return
+	}
+
+	// 登录态快照（与创建端点同模式：复活要走协议取新链）。
+	a.authMu.Lock()
+	sess, auth := a.session, a.auth
+	cookieStr := a.jar.String()
+	a.authMu.Unlock()
+	if sess == nil || !auth.LoginState() {
+		writeError(c, http.StatusUnauthorized, "not_logged_in", "未登录")
+		return
+	}
+
+	refresher := a.makeRefresher(tc)
+	url, err := refresher(c.Request.Context())
+	if err != nil {
+		writeError(c, http.StatusConflict, "needs_reparse", "重取直链失败（需重新解析）: "+err.Error())
+		return
+	}
+	mode, _ := parseTaskMode(tc.Mode) // 空值→ModeA（与 modeLabel 缺省一致）
+	newID, err := a.manager.Submit(
+		protocol.LinkResult{FID: tc.FID, FileName: tc.FileName, Size: tc.Size, URL: url},
+		tc.RelDir, cookieStr, mode,
+		engine.SubmitOpt{Threads: max(a.settings.Threads, 1), Refresher: refresher})
+	if err != nil {
+		switch {
+		case errors.Is(err, engine.ErrClosed):
+			writeError(c, http.StatusServiceUnavailable, "manager_closed", "下载管理器已关闭: "+err.Error())
+		case errors.Is(err, engine.ErrDestBusy):
+			writeError(c, http.StatusConflict, "dest_busy", errDestBusyMark)
+		default:
+			writeError(c, http.StatusBadGateway, "submit_failed", "复活任务失败: "+err.Error())
+		}
+		return
+	}
+
+	// TaskCtx.EngineID 换新（持锁读-改-写：重读最新存量，防并发创建
+	// 期间的丢更新——与创建端点同一临界区）。
+	tasksFileMu.Lock()
+	cur := store.LoadTasks(a.paths)
+	for i := range cur {
+		if cur[i].EngineID == id {
+			cur[i].EngineID = newID
+			break
+		}
+	}
+	err = store.SaveTasks(a.paths, cur)
+	tasksFileMu.Unlock()
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "save_tasks_failed",
+			fmt.Sprintf("任务已复活（%s）但持久化任务上下文失败: %v", newID, err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"task_id": newID})
+}
+
+// ctxTaskExists tasks.json 里是否有 EngineID==id 的条目（控制端点的
+// needs_reparse 判据）。Exists 条目 EngineID 空，天然不匹配。
+func ctxTaskExists(paths store.Paths, id string) bool {
+	for _, tc := range store.LoadTasks(paths) {
+		if tc.EngineID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// etaMS 由进度快照估算剩余毫秒：速度未知/已完成/总量为 0 → 0（前端
+// 按 0 不渲染倒计时）。
+func etaMS(p engine.Progress) int64 {
+	if p.SpeedBPS <= 0 || p.Total <= 0 || p.Done >= p.Total {
+		return 0
+	}
+	return int64(float64(p.Total-p.Done) / p.SpeedBPS * 1000)
+}
+
+// modeLabel TaskCtx.Mode 的 DTO 输出：非 "b" 一律 "a"（空值=旧数据，
+// 按缺省语义；与 parseTaskMode("")→ModeA 对齐）。
+func modeLabel(m string) string {
+	if m == "b" {
+		return "b"
+	}
+	return "a"
+}
+
+// modeString engine.Mode → TaskCtx.Mode 存储形（"a"/"b"，与 API 契约
+// 同形）。
+func modeString(m engine.Mode) string {
+	if m == engine.ModeB {
+		return "b"
+	}
+	return "a"
 }

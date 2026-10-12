@@ -90,6 +90,11 @@ var ErrClosed = errors.New("feiwu: Manager 已关闭")
 // API 统一错误码按本变量接线）。
 var ErrInvalidThreads = errors.New("feiwu: SubmitOpt.Threads 为负")
 
+// ErrDestBusy 同路径互斥拒绝（TryLockDest 失败，§3.13 不排队）：dest 已
+// 被在跑任务占用。Submit 以 wrap 形态返回（错误文本保持 §3.13 文案），
+// webapi 层用 errors.Is 识别（Task 10 起替代子串匹配）。
+var ErrDestBusy = errors.New("feiwu: 同一文件正在下载中")
+
 // Event 任务事件：进度帧（节流 500ms）与终态帧（Done 单调不减）。
 type Event struct {
 	TaskID   string
@@ -253,7 +258,7 @@ func (m *Manager) Submit(lr protocol.LinkResult, relDir, cookieStr string, mode 
 	}
 	absLower := strings.ToLower(abs)
 	if !m.sched.TryLockDest(absLower) {
-		return "", fmt.Errorf("feiwu: 同一文件正在下载中: %s", dest)
+		return "", fmt.Errorf("%w: %s", ErrDestBusy, dest)
 	}
 
 	id := fmt.Sprintf("t%d", m.nextID.Add(1))

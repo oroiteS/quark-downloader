@@ -31,6 +31,11 @@ type TaskCtx struct {
 	// 跳过」):未提交引擎,EngineID 为空;GET /api/tasks(Task 10)把它透出
 	// 为「已存在」终态。json tag 是 webapi 透传契约。
 	Exists bool `json:"exists,omitempty"`
+	// Mode 落盘模式("a"/"b",§3.5):POST /api/tasks 落盘,retry 复活
+	// (Task 10)与重启恢复(Task 11)读回——DTO 的 mode 字段与重走创建
+	// 路径都需要,而 §6.2 原字段清单无此项(控制者裁决追加,Exists 同例
+	// 的最小扩展)。空值按 "a" 缺省语义读回(旧数据兼容)。
+	Mode string `json:"mode,omitempty"`
 }
 
 // CanRefresh 可重取判定。§6.2 原版逐字:fid 非空 且(非分享 或
