@@ -4,3 +4,4 @@ test/
 .superpowers/
 .worktrees/
 .gocache/
+node_modules/

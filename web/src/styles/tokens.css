@@ -1,0 +1,125 @@
+/**
+ * Design tokens（frontend-designer skill 规范全集；D7 双主题）。
+ *
+ * 命名沿用 skill 约定：--color-* / --space-* / --text-* / --radius-* /
+ * --shadow-* / --transition-*。light 为默认（:root 与 [data-theme="light"]
+ * 同值，后者保证显式锁定时语义完整），dark 为 [data-theme="dark"] 覆盖段。
+ *
+ * AA 对比度自查（WCAG 2.1，正文阈值 4.5:1）：
+ * - light: primary #0066FF on #FFFFFF = 4.83:1 ✓；on-surface #1A1A1A on
+ *   #FFFFFF ≈ 17.4:1 ✓；error #D32F2F 4.98 ✓；success #2E7D32 5.12 ✓；
+ *   warning #B36000 4.58 ✓；info #1976D2 4.58 ✓
+ * - dark:  primary #4D94FF on #1A1A1A = 5.78:1 ✓；on-surface #FFFFFF ≈ 17.4:1 ✓；
+ *   error #EF5350 ≈ 5.0 ✓；success #66BB6A ≈ 7.3 ✓；warning #FFB74D > 7 ✓；
+ *   info #64B5F6 ≈ 6 ✓
+ * （on-primary 均与对应 primary 底色成对自查 ≥4.5:1）
+ */
+
+/* ---------- light（默认）---------- */
+:root,
+[data-theme='light'] {
+  /* Colors - Primary */
+  --color-primary: #0066ff;
+  --color-primary-hover: #0052cc;
+  --color-on-primary: #ffffff;
+  --color-secondary: #eef4ff;
+  --color-on-secondary: #0a3d99;
+
+  /* Colors - Surface */
+  --color-surface: #ffffff;
+  --color-surface-variant: #f5f5f5;
+  --color-on-surface: #1a1a1a;
+  --color-on-surface-muted: #5c5c5c;
+
+  /* Colors - Borders */
+  --color-border: #e0e0e0;
+  --color-border-hover: #bdbdbd;
+
+  /* Colors - Semantic */
+  --color-error: #d32f2f;
+  --color-success: #2e7d32;
+  --color-warning: #b36000;
+  --color-info: #1976d2;
+
+  /* Focus Ring */
+  --color-focus: #0066ff;
+
+  /* Scrim（Dialog 遮罩） */
+  --color-scrim: rgba(0, 0, 0, 0.45);
+}
+
+/* ---------- dark（跟随/锁定时由 data-theme 切换）---------- */
+[data-theme='dark'] {
+  --color-primary: #4d94ff;
+  --color-primary-hover: #6fa8ff;
+  --color-on-primary: #0b1929;
+  --color-secondary: #14263f;
+  --color-on-secondary: #a8c7f5;
+
+  --color-surface: #1a1a1a;
+  --color-surface-variant: #2a2a2a;
+  --color-on-surface: #ffffff;
+  --color-on-surface-muted: #a3a3a3;
+
+  --color-border: #3a3a3a;
+  --color-border-hover: #5c5c5c;
+
+  --color-error: #ef5350;
+  --color-success: #66bb6a;
+  --color-warning: #ffb74d;
+  --color-info: #64b5f6;
+
+  --color-focus: #4d94ff;
+
+  --color-scrim: rgba(0, 0, 0, 0.65);
+}
+
+/* ---------- 与主题无关的刻度 ---------- */
+:root {
+  /* Spacing Scale (8px base) */
+  --space-1: 0.25rem; /* 4px */
+  --space-2: 0.5rem; /* 8px */
+  --space-3: 0.75rem; /* 12px */
+  --space-4: 1rem; /* 16px */
+  --space-5: 1.5rem; /* 24px */
+  --space-6: 2rem; /* 32px */
+  --space-8: 3rem; /* 48px */
+  --space-10: 4rem; /* 64px */
+
+  /* Typography Scale */
+  --text-xs: 0.75rem; /* 12px */
+  --text-sm: 0.875rem; /* 14px */
+  --text-base: 1rem; /* 16px */
+  --text-lg: 1.125rem; /* 18px */
+  --text-xl: 1.25rem; /* 20px */
+  --text-2xl: 1.5rem; /* 24px */
+  --text-3xl: 1.875rem; /* 30px */
+  --text-4xl: 2.25rem; /* 36px */
+
+  /* Font Families（系统字体栈——skill 性能建议：零 webfont） */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+
+  /* Line Heights */
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.75;
+
+  /* Border Radius */
+  --radius-sm: 0.25rem; /* 4px */
+  --radius-md: 0.5rem; /* 8px */
+  --radius-lg: 1rem; /* 16px */
+  --radius-full: 9999px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+  --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.15);
+
+  /* Transitions */
+  --transition-fast: 150ms ease;
+  --transition-base: 200ms ease;
+  --transition-slow: 300ms ease;
+}

@@ -1,0 +1,47 @@
+/* 全局基底（Task 1）：tokens 引入 + 重置 + body 主题色。
+   组件样式各自携带；布局样式归后续任务。 */
+@import './styles/tokens.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--color-on-surface);
+  background: var(--color-surface);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 0;
+  line-height: var(--leading-tight);
+}
+
+p {
+  margin: 0;
+}
+
+/* Task 1 占位壳样式（App/布局在 Task 4 落地后移除） */
+.app-bootstrap {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  font-size: var(--text-3xl);
+  color: var(--color-primary);
+}
