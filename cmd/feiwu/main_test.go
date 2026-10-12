@@ -1,22 +1,25 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"quark-downloader/internal/store"
+	"quark-downloader/internal/webapi"
 )
 
-// TestRunLifecycle 端到端冒烟（Task 1 核心验收）：无浏览器 + 随机端口下
-// run 可启动；GET /api/health → 200 {"status":"ok"}；ctx 取消后 run 干净
-// 返回（serve goroutine 已 join，无泄漏）、监听端口真正下线。
+// TestRunLifecycle 端到端冒烟（Task 1 核心验收，Task 5 换真装配后语义
+// 不降）：无浏览器 + 随机端口下 run 可启动；GET /api/health → 200
+// {"status":"ok"}；ctx 取消后 run 干净返回（serve goroutine 已 join，
+// 无泄漏）、监听端口真正下线。
 func TestRunLifecycle(t *testing.T) {
 	t.Setenv("FEIWU_NO_BROWSER", "1")
+	t.Setenv("FEIWU_DATA_DIR", t.TempDir()) // 隔离数据目录（ResolvePaths 真实定位）
 
 	ready := make(chan string, 1)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -45,10 +48,11 @@ func TestRunLifecycle(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("/api/health 状态码 = %d, 期望 200", resp.StatusCode)
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
-		t.Fatalf("Content-Type = %q, 期望 application/json", ct)
+	// gin 的 JSON Content-Type 带 charset 后缀。
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, 期望 application/json*", ct)
 	}
-	if want := `{"status":"ok"}`; !bytes.Equal(body, []byte(want)) {
+	if want := `{"status":"ok"}`; string(body) != want {
 		t.Fatalf("/api/health 响应体 = %q, 期望 %q", body, want)
 	}
 
@@ -70,9 +74,10 @@ func TestRunLifecycle(t *testing.T) {
 	}
 }
 
-// TestNewRouterHealth 占位 router 冒烟（httptest 级别，裁决 1）。
-func TestNewRouterHealth(t *testing.T) {
-	srv := httptest.NewServer(newRouter())
+// TestRouterHealth run 所用 router（webapi.App）的 httptest 级冒烟：
+// /api/health 端点在真 router 上可用（裁决 1：Router() 是 App 门面）。
+func TestRouterHealth(t *testing.T) {
+	srv := httptest.NewServer(webapi.New(webapi.Deps{}).Router())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/health")
@@ -87,25 +92,35 @@ func TestNewRouterHealth(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("状态码 = %d, 期望 200", resp.StatusCode)
 	}
-	if want := `{"status":"ok"}`; !bytes.Equal(body, []byte(want)) {
+	if want := `{"status":"ok"}`; string(body) != want {
 		t.Fatalf("响应体 = %q, 期望 %q", body, want)
 	}
 }
 
-// TestResolveDataDir 数据目录临时实现：FEIWU_DATA_DIR 优先，缺省
-// os.TempDir 下 feiwu 子目录（TODO Task 2 由 store.ResolvePaths 回填）。
-func TestResolveDataDir(t *testing.T) {
-	t.Run("env 优先", func(t *testing.T) {
-		t.Setenv("FEIWU_DATA_DIR", t.TempDir())
-		if got := resolveDataDir(); got != os.Getenv("FEIWU_DATA_DIR") {
-			t.Fatalf("resolveDataDir() = %q, 期望 FEIWU_DATA_DIR 的值", got)
+// TestResolvePathsSmoke run 的数据目录现由 store.ResolvePaths 定位
+// （G7；完整矩阵测试在 internal/store）。这里冒烟 FEIWU_DATA_DIR 覆盖
+// 一切——run 的测试隔离依赖该语义。
+func TestResolvePathsSmoke(t *testing.T) {
+	t.Run("FEIWU_DATA_DIR 覆盖一切", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("FEIWU_DATA_DIR", dir)
+		p := store.ResolvePaths()
+		if p.DataDir != dir {
+			t.Fatalf("DataDir = %q, 期望 %q", p.DataDir, dir)
+		}
+		if p.Root != dir {
+			t.Fatalf("Root = %q, 期望与 DataDir 同值", p.Root)
 		}
 	})
-	t.Run("缺省为 TempDir/feiwu", func(t *testing.T) {
-		t.Setenv("FEIWU_DATA_DIR", "")
-		want := filepath.Join(os.TempDir(), "feiwu")
-		if got := resolveDataDir(); got != want {
-			t.Fatalf("resolveDataDir() = %q, 期望 %q", got, want)
+	t.Run("设置/任务文件落 DataDir", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("FEIWU_DATA_DIR", dir)
+		p := store.ResolvePaths()
+		if got, want := p.SettingsFile, dir+"/settings.json"; got != want {
+			t.Fatalf("SettingsFile = %q, 期望 %q", got, want)
+		}
+		if got, want := p.TasksFile, dir+"/tasks.json"; got != want {
+			t.Fatalf("TasksFile = %q, 期望 %q", got, want)
 		}
 	})
 }

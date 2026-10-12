@@ -1,10 +1,9 @@
-// feiwu 主程序装配（Task 1 骨架）：数据目录 → 设置/Manager 占位 →
-// HTTP 服务 → rlimit 自提 → 监听 → 自动开浏览器 → ctx 取消优雅退出。
+// feiwu 主程序装配：数据目录/设置/秘钥（store）→ webapi.App → gin
+// server → rlimit 自提 → 监听 → 自动开浏览器 → ctx 取消优雅退出。
 //
-// 系列 3/5（store + Web API）的装配骨架：store.Paths（Task 2）与
-// webapi.New（Task 5）落地前，数据目录与 router 均为最小占位（见各
-// TODO）。本任务核心验收是 run(ctx) 生命周期：启动 → 监听 127.0.0.1:0
-// （端口写日志）→ ctx 取消后 server 优雅退出、serve goroutine 全部回收。
+// 系列 3/5（store + Web API）的装配主干：run(ctx) 只做装配与生命周期，
+// 应用态全部收敛在 webapi.App（后续 restoreSession/restoreTasks/引擎
+// 接线都挂 App 内部方法位，main 不再为此改动——裁决 P1）。
 package main
 
 import (
@@ -17,14 +16,16 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
+
+	"quark-downloader/internal/store"
+	"quark-downloader/internal/webapi"
 )
 
-// shutdownTimeout 优雅关闭预算：HTTP 排空；Task 5+ 接线后 Manager.Close
-// （E6 保留断点）与 store 落盘共享同一预算。
+// shutdownTimeout 优雅关闭预算：HTTP 排空；Manager.Close（E6 保留断点）
+// 与 store 落盘共享同一预算（TODO Task 9/11 接线）。
 const shutdownTimeout = 5 * time.Second
 
 // runConfig run 的可注入点（测试用）；零值即生产路径。
@@ -40,10 +41,10 @@ func withOnReady(f func(addr string)) runOption {
 
 // run 核心装配与生命周期（main 可测试化的全部逻辑）：
 //
-//	数据目录定位（TODO Task 2 store.ResolvePaths）→ 设置/Manager 占位 →
-//	占位 router（TODO Task 5 webapi.New）→ rlimit 自提 → 监听（端口写
-//	日志）→ 自动开浏览器（G8）→ <-ctx.Done() → srv.Shutdown → join
-//	serve goroutine（无泄漏）。
+//	store.ResolvePaths（G7）→ LoadSettings/SecretStore → webapi.New →
+//	app.Start（restore 钩子，当前空位）→ rlimit 自提 → 监听（端口写
+//	日志）→ 自动开浏览器（G8）→ <-ctx.Done() → srv.Shutdown（OnShutdown
+//	先行关闭 SSE hub）→ app.Close → join serve goroutine（无泄漏）。
 //
 // 返回前 join serveDone：run 返回 ⇒ serve goroutine 已退出。
 func run(ctx context.Context, opts ...runOption) error {
@@ -52,19 +53,32 @@ func run(ctx context.Context, opts ...runOption) error {
 		o(&cfg)
 	}
 
-	// 1) 数据目录（临时实现）。
-	dataDir := resolveDataDir()
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return fmt.Errorf("创建数据目录 %s: %w", dataDir, err)
+	// 1) 数据目录与持久化装配（G7；目录创建是首次写入者职责，这里为
+	// 秘钥/设置预建）。
+	paths := store.ResolvePaths()
+	if err := os.MkdirAll(paths.DataDir, 0o755); err != nil {
+		return fmt.Errorf("创建数据目录 %s: %w", paths.DataDir, err)
 	}
-	slog.Info("数据目录就绪", "dir", dataDir)
-	// TODO(Task 2): store.ResolvePaths 回填——配置/下载目录与断点 DB 的规范路径。
-	// TODO(Task 3): 设置加载（store.LoadSettings）。
-	// TODO(Task 5+): 会话/Manager 装配（engine.NewManager + onEvent 接线）。
+	settings := store.LoadSettings(paths) // 缺失/坏文件 → 默认，不挡启动
+	secrets := store.NewSecretStore(paths)
+	slog.Info("数据目录就绪", "dir", paths.DataDir)
+	// TODO(Task 9): 会话/Manager 装配（engine.NewManager + onEvent 接线
+	// 到 hub.Broadcast），经 webapi.Deps.Manager 注入。
 
-	handler := newRouter()
+	app := webapi.New(webapi.Deps{
+		Paths:    paths,
+		Settings: settings,
+		Secrets:  secrets,
+	})
+	handler := app.Router()
 
-	// 2) rlimit 自提（选型报告 §5.2：512 连发 + 每片文件句柄，macOS 默认
+	// 2) 启动钩子：restoreSession（Task 7）/restoreTasks（Task 11）——
+	// 当前为 App 内空方法位，签名与调用链已冻结。
+	if err := app.Start(ctx); err != nil {
+		return fmt.Errorf("应用启动钩子: %w", err)
+	}
+
+	// 3) rlimit 自提（选型报告 §5.2：512 连发 + 每片文件句柄，macOS 默认
 	// soft 256 不够）。失败不致命：记日志继续。
 	before, after, err := raiseFDLimit()
 	switch {
@@ -74,7 +88,8 @@ func run(ctx context.Context, opts ...runOption) error {
 		slog.Info("fd 上限已自提", "before", before, "after", after)
 	}
 
-	// 3) 监听：默认 127.0.0.1:0（随机端口写日志；FEIWU_PORT 可配）。
+	// 4) 监听：默认 127.0.0.1:0（随机端口写日志；FEIWU_PORT 可配——设置
+	// 无端口字段，端口仅 env 可配是设计取舍）。
 	addr := listenAddr()
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -82,6 +97,9 @@ func run(ctx context.Context, opts ...runOption) error {
 	}
 	url := "http://" + ln.Addr().String()
 	srv := &http.Server{Handler: handler}
+	// Shutdown 开始即触发 App.Close（关 SSE hub 让长连接退出，排空不必
+	// 拖满预算后强关）；幂等，下方关闭链再调一次无妨。
+	srv.RegisterOnShutdown(app.Close)
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- srv.Serve(ln) }()
 	slog.Info("feiwu 监听中", "url", url)
@@ -89,20 +107,22 @@ func run(ctx context.Context, opts ...runOption) error {
 		cfg.onReady(url)
 	}
 
-	// 4) 自动开浏览器（G8）：失败仅记日志，绝不影响服务。
+	// 5) 自动开浏览器（G8）：失败仅记日志，绝不影响服务。
 	if err := openBrowser(url); err != nil {
 		slog.Warn("自动开浏览器失败", "err", err)
 	}
 
-	// 5) 信号驱动优雅关闭（SIGINT/SIGTERM → shutdown → Manager.Close →
-	// store 落盘；后两者 Task 5+ 接线）。
+	// 6) 信号驱动优雅关闭（SIGINT/SIGTERM → shutdown → app.Close）。
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		srv.Close() // 排空超时：强关兜底
 	}
-	// TODO(Task 5+): Manager.Close（E6 保留断点）与 store 落盘。
+	// App 生命周期收口（hub 已由 OnShutdown 关闭；此处幂等再收）。
+	// TODO(Task 9): Manager.Close（E6 保留断点）经 App.Close 扩展。
+	// TODO(Task 11): store 落盘（tasks.json）经 App.Close 扩展。
+	app.Close()
 	if err := <-serveDone; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("http serve: %w", err)
 	}
@@ -110,35 +130,12 @@ func run(ctx context.Context, opts ...runOption) error {
 	return nil
 }
 
-// resolveDataDir 数据目录临时实现：FEIWU_DATA_DIR 优先，缺省 os.TempDir
-// 下 feiwu 子目录。
-// TODO(Task 2): store.ResolvePaths 回填。
-func resolveDataDir() string {
-	if d := os.Getenv("FEIWU_DATA_DIR"); d != "" {
-		return d
-	}
-	return filepath.Join(os.TempDir(), "feiwu")
-}
-
 // listenAddr 监听地址：FEIWU_PORT 可配；缺省 127.0.0.1:0（随机端口写日志）。
-// TODO(Task 3): 设置可配端口（store.Settings 覆盖 env）。
 func listenAddr() string {
 	if p := os.Getenv("FEIWU_PORT"); p != "" {
 		return net.JoinHostPort("127.0.0.1", p)
 	}
 	return net.JoinHostPort("127.0.0.1", "0")
-}
-
-// newRouter 最小占位 router：GET /api/health → 200 {"status":"ok"}。
-// TODO(Task 5): webapi.New 回填——设置/会话/任务完整 API。
-func newRouter() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
-	return mux
 }
 
 // openBrowser 自动开浏览器（G8）：FEIWU_NO_BROWSER=1 跳过（测试/无头

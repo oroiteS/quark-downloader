@@ -1,0 +1,181 @@
+// Package webapi 飞舞 Web API：gin 骨架（App 生命周期 + 事件总线 + 静态
+// 服务）。本文件是应用骨架——后续 8 个任务（settings/session/tasks 等
+// API、restore 钩子接线）都在 App 的字段位与 buildRouter 上生长。
+package webapi
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"quark-downloader/internal/engine"
+	"quark-downloader/internal/protocol"
+	"quark-downloader/internal/store"
+)
+
+// Deps App 构造依赖。字段只增不改（后续任务扩展挂载点）。
+type Deps struct {
+	Paths    store.Paths        // 数据目录定位结果（G7）
+	Settings store.Settings     // 启动时加载的设置（Task 13 的 GET/PUT /api/settings 读写它）
+	Secrets  *store.SecretStore // Cookie 加密存取（Task 6 会话装配消费）
+	Manager  *engine.Manager    // 下载管理器；Task 9 前无引擎交互，可 nil 占位
+}
+
+// App 是 feiwu 的应用态容器（裁决 P1）：session/manager/store/settings/
+// hub 全部收敛在此，main.go 只做装配与信号接线。后续 Task 7
+// （restoreSession）/Task 9（Manager 接线）/Task 11（restoreTasks）/
+// Task 12-13（API 端点）都改 App 内部，main.go 不再为此改动。
+type App struct {
+	paths    store.Paths
+	settings store.Settings
+	secrets  *store.SecretStore
+	manager  *engine.Manager // nil = Task 9 前占位
+
+	session *protocol.Session // 会话态；Task 7/9 restoreSession 装配后非 nil
+
+	hub    *Hub
+	router *gin.Engine
+}
+
+// New 装配 App（hub、router 一次建好；Router 返回同一实例）。
+func New(deps Deps) *App {
+	a := &App{
+		paths:    deps.Paths,
+		settings: deps.Settings,
+		secrets:  deps.Secrets,
+		manager:  deps.Manager,
+		hub:      NewHub(),
+	}
+	a.router = a.buildRouter()
+	return a
+}
+
+// Router 返回应用的 gin 引擎（健康检查、SSE、静态与后续 /api 端点）。
+func (a *App) Router() *gin.Engine { return a.router }
+
+// Start 启动钩子：恢复链入口（main 在监听前调用一次）。
+//
+//	restoreSession（Task 7：Cookie 恢复 + 会话装配）
+//	restoreTasks（Task 11：tasks.json 恢复 + 重新提交）
+//
+// 本任务两者均为空方法位——签名与调用链先冻结，后续任务只填实现体。
+func (a *App) Start(ctx context.Context) error {
+	if err := a.restoreSession(ctx); err != nil {
+		return fmt.Errorf("恢复会话: %w", err)
+	}
+	if err := a.restoreTasks(ctx); err != nil {
+		return fmt.Errorf("恢复任务: %w", err)
+	}
+	return nil
+}
+
+// restoreSession 会话恢复钩子（Task 7 挂载位）。
+func (a *App) restoreSession(context.Context) error { return nil }
+
+// restoreTasks 任务恢复钩子（Task 11 挂载位）。
+func (a *App) restoreTasks(context.Context) error { return nil }
+
+// Close 关闭钩子（main 挂 http.Server.RegisterOnShutdown；Shutdown 开始
+// 即触发，让 SSE 长连接先行退出——排空不被 5s 预算拖满后强关）。幂等。
+func (a *App) Close() {
+	a.hub.Close()
+	// TODO(Task 9): a.manager.Close()——E6 停机保留断点（manager 非 nil 时）。
+	// TODO(Task 11): store 落盘（tasks.json 任务上下文快照）。
+}
+
+// buildRouter 装配 gin 引擎：
+//
+//	/api 组（health + events + 后续任务的全部 API）＋错误中间件
+//	（统一 {error:{code,message}}；panic → 500 internal，不泄漏堆栈）；
+//	静态与 SPA fallback（static.go）；不做 CORS——前端同源 embed。
+func (a *App) buildRouter() *gin.Engine {
+	r := gin.New()
+	r.Use(gin.CustomRecovery(func(c *gin.Context, _ any) {
+		writeError(c, http.StatusInternalServerError, "internal", "服务器内部错误")
+	}))
+
+	api := r.Group("/api")
+	api.GET("/health", a.handleHealth)
+	api.GET("/events", a.handleEvents)
+
+	registerStatic(r)
+	r.NoRoute(func(c *gin.Context) {
+		// /api（含 /api/ 前缀子路径）的未匹配路径保持 JSON 语义（客户端
+		// bug 或版本错配，回落 HTML 只会掩盖）；其余路径走 SPA fallback。
+		if p := c.Request.URL.Path; p == "/api" || strings.HasPrefix(p, "/api/") {
+			writeError(c, http.StatusNotFound, "not_found", "接口不存在: "+p)
+			return
+		}
+		serveStatic(c)
+	})
+	return r
+}
+
+// handleHealth GET /api/health → 200 {"status":"ok"}（Task 1 验收语义）。
+func (a *App) handleHealth(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// sseHeartbeat 心跳间隔（包级变量：测试注入短值验证心跳行；生产 15s）。
+var sseHeartbeat = 15 * time.Second
+
+// handleEvents GET /api/events——SSE 事件流：
+//
+//	Content-Type text/event-stream；事件帧 "data: {json}\n\n"（Event 的
+//	JSON 序列化）；心跳为注释行 ": ping\n\n"（15s——保活并穿透中间代理
+//	缓冲，注释行前端 EventSource 自动忽略）；客户端断开（request ctx
+//	Done）即退订；hub 关闭（服务停机）亦退出。
+func (a *App) handleEvents(c *gin.Context) {
+	ch, cancel := a.hub.Subscribe()
+	defer cancel() // 客户端断开/服务停机统一在此退订（幂等）
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Status(http.StatusOK)
+	flusher, _ := c.Writer.(http.Flusher)
+	if flusher == nil { // gin/httptest 的 ResponseWriter 均实现；极端环境降级为一次性输出
+		flusher = nopFlusher{}
+	}
+	flusher.Flush() // 头先行，让客户端立刻拿到 Content-Type
+
+	ticker := time.NewTicker(sseHeartbeat)
+	defer ticker.Stop()
+	ctx := c.Request.Context()
+	for {
+		select {
+		case e, ok := <-ch:
+			if !ok {
+				return // hub 关闭（停机链）
+			}
+			b, err := json.Marshal(e)
+			if err != nil {
+				continue // 序列化失败：丢本帧（不应发生），流不断
+			}
+			fmt.Fprintf(c.Writer, "data: %s\n\n", b)
+			flusher.Flush()
+		case <-ticker.C:
+			fmt.Fprint(c.Writer, ": ping\n\n")
+			flusher.Flush()
+		case <-ctx.Done():
+			return // 客户端断开
+		}
+	}
+}
+
+// nopFlusher Flusher 空实现（Writer 不可 Flush 时的降级占位）。
+type nopFlusher struct{}
+
+func (nopFlusher) Flush() {}
+
+// writeError 统一错误出口：{error:{code,message}}（Task 12+ 全部 /api
+// 端点的错误形态；CORS 不做——同源 embed）。
+func writeError(c *gin.Context, status int, code, message string) {
+	c.AbortWithStatusJSON(status, gin.H{
+		"error": gin.H{"code": code, "message": message},
+	})
+}
