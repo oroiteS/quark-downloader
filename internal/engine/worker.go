@@ -4,11 +4,13 @@
 //	冷启动错峰 sleep(ramp × w / N)；片队列 segQueue 支持抢占重入（MPMC 工作窃取）
 //	每片：gate.Acquire → W≥片大小跳过 → 片级重试循环（1 首试 + ≤4 重试, BackoffSeg 退避,
 //	从 S+W 断点续, §3.10）→ 独立开流 Seek(S+W) → io.CopyBuffer 流写 → 写完即关
-//	收尾（§3.10）：finalizeCleanup 按错误分类表处置半成品（删/留/转单线程/4xx 兜底）
+//	收尾（§3.10/§3.11）：完整性终判先行（cancelled/errors 非空但 done ≥ total →
+//	按成功处理）→ finalizeCleanup 按错误分类表处置半成品（删/留/转单线程/4xx 兜底）
 //	限流制动（§3.8）：429/503 → gate.Shrink（max(4,×0.7)，非阻塞收差额票）
 //	慢连接抢占（§3.7）：监视线程每 5s 两遍扫描，掐慢连接的片级令牌 →
 //	  errPreempted → 片重新入队（W 保留、不计失败不退避）
-//	监视线程：200ms 采样速度 + 每 1s 全量 SaveQMeta + gate.TickRecover
+//	监视线程：200ms 采样速度 + 停滞看门狗 Tick（§3.9，45s 无前进 → 看门狗级
+//	  取消）+ 每 1s 全量 SaveQMeta + gate.TickRecover
 package engine
 
 import (
@@ -28,8 +30,10 @@ import (
 // runA 装配并运行模式 A 主循环（§3.5 模式 A）。ctx 是任务级生命周期：
 // 取消即全体退出（错误=ctx.Err()、终态=canceled）。W 为恢复对账后的
 // 记账起点（全新任务全零），完成后 W 全满且 .qmeta 留有完成凭证。
-// 失败/取消收尾走 finalizeCleanup（§3.10）——Range 不支持转单线程、
-// 4xx 零进度两组净头兜底可能在这里翻转终态。
+// 收尾顺序（§3.11 先于 §3.10）：完整性终判 → finalizeCleanup——cancelled
+// 或 errors 非空但数据完整（done ≥ total）按成功处理，绝不删完整文件；
+// 失败/取消走 finalizeCleanup（Range 不支持转单线程、4xx 零进度两组净头
+// 兜底可能在这里翻转终态）。
 func (t *Task) runA(ctx context.Context) error {
 	if len(t.Segs) == 0 {
 		return errors.New("feiwu: 任务无分片（total 非法或 plan 为空）")
@@ -90,28 +94,32 @@ func (t *Task) runA(ctx context.Context) error {
 	t.errMu.Lock()
 	err := t.firstErr
 	t.errMu.Unlock()
-	switch {
-	case err != nil:
-		t.state.Store(int32(stateError))
-	case parent.Err() != nil: // 外部取消（内部失败已走上一分支；自己收尾的 cancel 不算）
-		t.state.Store(int32(stateCanceled))
-		err = parent.Err()
-	default:
-		t.state.Store(int32(stateDone))
+	if err == nil && parent.Err() != nil {
+		err = parent.Err() // 外部取消（内部失败已走 firstErr；自己收尾的 cancel 不算）
 	}
 
-	// §3.10 收尾：错误分类 → 半成品生死（删/留/转单线程）+ 4xx 零进度
-	// 兜底。兜底成功会翻转终态为 done；兜底途中用户取消按取消归类。
+	// ⑦ 完整性终判（§3.11，先于 finalizeCleanup 的删除动作——T8 审查
+	//    锚点）：cancelled 或 errors 非空时，报失败之前先验证数据本身——
+	//    done ≥ total（模式 A）→ 按成功处理（Note 注明有传输错误但数据
+	//    完整）。绝不「取消瞬间任务恰已完成」还删完整文件。模式 B 的
+	//    文件长度复判由 Task 12 在 verdict 内扩展。
 	if err != nil {
-		err = t.finalizeCleanup(parent, err)
-		switch {
-		case err == nil:
-			t.state.Store(int32(stateDone))
-		case isCancellation(err):
-			t.state.Store(int32(stateCanceled))
-		default:
-			t.state.Store(int32(stateError))
+		if v := t.verdict(); v.Success {
+			err = nil // 数据完整：翻转终态为 done，跳过清理删除
+		} else {
+			// §3.10 收尾：错误分类 → 半成品生死（删/留/转单线程/4xx 兜底）。
+			// 兜底成功会翻转终态为 done；兜底途中用户取消按取消归类。
+			err = t.finalizeCleanup(parent, err)
 		}
+	}
+
+	switch {
+	case err == nil:
+		t.state.Store(int32(stateDone))
+	case isCancellation(err):
+		t.state.Store(int32(stateCanceled))
+	default:
+		t.state.Store(int32(stateError))
 	}
 	return err
 }
@@ -592,6 +600,9 @@ func (t *Task) monitorA(ctx context.Context, wg *sync.WaitGroup) {
 		case now := <-tk.C:
 			t.gate.TickRecover(now) // §3.8 恢复：距上次限流 ≥30s 且 limit<N → +1（节奏判定在 Gate 内，200ms 一跳只是喂表）
 			t.speed.Sample(t.done.Load(), now)
+			if t.watchdog != nil {
+				t.watchdog.Tick(now) // §3.9 停滞看门狗：每 200ms 读 done，45s 无前进 → stalled + 看门狗级取消
+			}
 			if t.onEvent != nil {
 				t.onEvent(t.progress())
 			}

@@ -68,6 +68,7 @@ type Progress struct {
 	Done, Total int64   // 累计已写字节（= ΣW，进度只认记账 §3.6 ②）/ 文件总字节
 	SpeedBPS    float64 // EWMA 速度估计（§3.12，字节/秒；首帧 0 属预期）
 	State       string  // taskState 字符串
+	Merging     bool    // §3.9 收尾合并阶段状态位：进度改报「正在合并分片」（合并吞吐归 Task 12）
 }
 
 // Task 是模式 A/B 下载任务的骨架结构。导出字段是装配输入（测试同包可直
@@ -101,6 +102,9 @@ type Task struct {
 
 	// ---- Task 10（§3.7 慢连接抢占）----
 	preempt *Preemptor // 两遍扫描看门狗（worker begin/end 登记、monitorA 周期 Scan；nil 防御：直接构造 Task 的路径）
+
+	// ---- Task 11（§3.9 停滞看门狗）----
+	watchdog *Watchdog // 停滞看门狗（monitorA 每 sampleEvery 节拍 Tick；nil 防御：直接构造 Task 的路径）
 
 	// ---- 钩子（nil 安全；Task 14 / 测试装配）----
 	onEvent       func(Progress) // 进度事件回调（监视线程节拍驱动）
@@ -140,6 +144,7 @@ func newTask(id, dest, url, cookieStr string, threads int, total int64) *Task {
 		sleep:        sleepCtx,               // §3.10 片级重试退避等待
 	}
 	tk.preempt = newPreemptor(tk, n, len(segs)) // §3.7 采样表按 worker 编号（n 与 runA 同式）
+	tk.watchdog = newWatchdog(tk, stalledEvery) // §3.9 停滞阈值 45s（测试注入 tk.watchdog.threshold）
 	return tk
 }
 
@@ -151,6 +156,7 @@ func (t *Task) progress() Progress {
 		Total:    t.Total,
 		SpeedBPS: t.speed.BPS(),
 		State:    taskState(t.state.Load()).String(),
+		Merging:  t.watchdog != nil && t.watchdog.Merging(), // §3.9 合并阶段状态位
 	}
 }
 
