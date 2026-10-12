@@ -1,6 +1,8 @@
 // Task：一个下载任务的运行时形态（§3.1 流水线 ⑤ 的执行主体）。
-// 装配输入由 Task 14（Manager）或测试直接填写；未导出运行态字段随
-// Task 8–12（重试/抢占/看门狗/模式 B）逐步累积，本文件只立骨架。
+// 装配输入由 Manager（Task 14，manager.go）或测试直接填写：Manager 负责
+// TryLockDest 同路径互斥、newTask 构造、.qmeta 恢复对账回填 W、NewGate
+// 真闸门替换 noOpGate 占位（Ruling E1）、节流事件钩子与直链自愈换链
+// 重跑（§2.10——每次尝试一个新 Task，W 从 .qmeta 读回无损续传）。
 package engine
 
 import (
@@ -131,8 +133,9 @@ type Task struct {
 }
 
 // newTask 按默认装配构造任务：分片规划、引擎客户端、直通闸门、生产常数
-// （ramp=Ramp(N)、采样 200ms、qmeta 1s）。恢复续传时调用方自行 LoadQMeta
-// + ReconcileA 后覆写 W 并把 ΣW 存入 done。
+// （ramp=Ramp(N)、采样 200ms、qmeta 1s）。恢复续传时 Manager（Task 14）
+// LoadQMeta + ReconcileA/B 后覆写 W 并把 ΣW 存入 done，再以 NewGate(n)
+// 替换直通闸门。
 func newTask(id, dest, url, cookieStr string, threads int, total int64) *Task {
 	segs := Plan(total, threads)
 	n := max(min(threads, len(segs), effMax), 1)
