@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -33,24 +34,36 @@ type Deps struct {
 type App struct {
 	paths    store.Paths
 	settings store.Settings
-	secrets  *store.SecretStore
+	secrets  secretStore     // 凭据加密存取（*store.SecretStore 满足；测试注入 fake）
 	manager  *engine.Manager // nil = Task 9 前占位
 
-	session *protocol.Session // 会话态；Task 7/9 restoreSession 装配后非 nil
+	// 登录流会话组（auth.go 维护）：jar 与 session/auth 同源，
+	// resetSession 原子重建三者；newAuthPair 是装配工厂（测试注入点）。
+	authMu          sync.Mutex
+	jar             *protocol.CookieJar
+	session         *protocol.Session // 业务会话（Task 9 直链等）；与 auth 同源
+	auth            authAPI           // 登录流操作面（sessionAuth 适配或测试 fake）
+	newAuthPair     func(jar *protocol.CookieJar) (*protocol.Session, authAPI)
+	qr              qrSession          // 进行中的扫码会话；nil = 无
+	keepaliveCancel context.CancelFunc // 保活心跳停止开关；nil = 未启动
 
 	hub    *Hub
 	router *gin.Engine
 }
 
 // New 装配 App（hub、router 一次建好；Router 返回同一实例）。
+// 会话组以生产工厂初始装配（空 jar 未登录态）；Task 7 的 restoreSession
+// 将在 Start 时用 SecretStore 里已存的 Cookie 重建登录态。
 func New(deps Deps) *App {
 	a := &App{
-		paths:    deps.Paths,
-		settings: deps.Settings,
-		secrets:  deps.Secrets,
-		manager:  deps.Manager,
-		hub:      NewHub(),
+		paths:       deps.Paths,
+		settings:    deps.Settings,
+		secrets:     deps.Secrets,
+		manager:     deps.Manager,
+		newAuthPair: newAuthPairDefault,
+		hub:         NewHub(),
 	}
+	a.resetSession()
 	a.router = a.buildRouter()
 	return a
 }
@@ -83,6 +96,9 @@ func (a *App) restoreTasks(context.Context) error { return nil }
 // Close 关闭钩子（main 挂 http.Server.RegisterOnShutdown；Shutdown 开始
 // 即触发，让 SSE 长连接先行退出——排空不被 5s 预算拖满后强关）。幂等。
 func (a *App) Close() {
+	a.authMu.Lock()
+	a.stopKeepaliveLocked() // 停保活心跳（§2.6：ctx 取消即停）
+	a.authMu.Unlock()
 	a.hub.Close()
 	// TODO(Task 9): a.manager.Close()——E6 停机保留断点（manager 非 nil 时）。
 	// TODO(Task 11): store 落盘（tasks.json 任务上下文快照）。
@@ -102,6 +118,13 @@ func (a *App) buildRouter() *gin.Engine {
 	api := r.Group("/api")
 	api.GET("/health", a.handleHealth)
 	api.GET("/events", a.handleEvents)
+
+	// 登录流端点（D8/§6.3，auth.go）。
+	api.POST("/login/qr/start", a.handleQRStart)
+	api.GET("/login/qr/state", a.handleQRState)
+	api.POST("/login/cookie", a.handleCookieImport)
+	api.POST("/logout", a.handleLogout)
+	api.GET("/account", a.handleAccount)
 
 	registerStatic(r)
 	r.NoRoute(func(c *gin.Context) {
