@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,9 +60,19 @@ const defaultThreads = 32 // Config 零值默认（G5；与 §3.13 默认并发 
 // eventEveryDefault 进度事件节流（Task 14：500ms；Task 采样 200ms 不变）。
 const eventEveryDefault = 500 * time.Millisecond
 
+// defaultMaxTasks 登记表条目上限默认（F2 审查）：终态淘汰门槛。登记条目
+// 常驻 Cookie/URL 等上下文（百字节级），1024 条 ≈ 数百 KB；超限按终态
+// 时间最早淘汰**已终态**条目（存活任务绝不淘汰）。
+const defaultMaxTasks = 1024
+
 // refreshMax 直链自愈刷新上限（§2.10 逐字「刷新次数 < 5」：直链 TTL 约
 // 5~10 分钟，9GB 任务约碰 2~4 次，上限防死循环）。
 const refreshMax = 5
+
+// defaultRefreshTimeout 刷新调用超时（F1 审查）：规格未定刷新时长——
+// refresher 实为秒级协议调用（带 Cookie 重取直链），60s 只是兜底工程
+// 选择；该层与任务取消链任一到期，都按「取不到新链」中止保留断点。
+const defaultRefreshTimeout = 60 * time.Second
 
 // ErrPaused 用户暂停（Manager 语义）：Pause 经 Task.fail 注入，runA/runB
 // 以它收尾（isCancellation=false → finalizeCleanup 保留半成品），Manager
@@ -70,6 +81,9 @@ var ErrPaused = errors.New("feiwu: 用户暂停（断点保留）")
 
 // ErrTaskNotFound Get/控制接口的任务不存在错误。
 var ErrTaskNotFound = errors.New("feiwu: 任务不存在")
+
+// ErrClosed Manager 已 Close：Submit 拒绝新任务（F2 审查）。
+var ErrClosed = errors.New("feiwu: Manager 已关闭")
 
 // Event 任务事件：进度帧（节流 500ms）与终态帧（Done 单调不减）。
 type Event struct {
@@ -81,8 +95,9 @@ type Event struct {
 // SubmitOpt Submit 可选注入（零值全空 = 无自愈，401/403/412 直接失败）。
 type SubmitOpt struct {
 	// Refresher 重取直链回调（§2.10：需要保存 fid/分享上下文才能重取，
-	// 由上层注入）。ctx 由 Manager 提供；返回空串或与旧相同的 URL 都按
-	// 「取不到新链」中止保留断点。
+	// 由上层注入）。ctx 由 Manager 提供——挂在该任务取消链上（Cancel 可
+	// 达）并带 60s 超时，回调应尊重 ctx；两层任一到期、返回错误、返回
+	// 空串或与旧相同的 URL，都按「取不到新链」中止保留断点。
 	Refresher func(ctx context.Context) (string, error)
 }
 
@@ -109,13 +124,14 @@ type managedTask struct {
 
 	mu        sync.Mutex
 	task      *Task              // 当前/最后 attempt（Get 读进度、Cancel/Retry 清理）
-	cancel    context.CancelFunc // 当前 attempt 的父 ctx cancel（nil=未起跑/已收尾）
+	cancel    context.CancelFunc // 当前 loop 的取消链根 cancel（nil=未起跑/已收尾）
 	phase     taskPhase
 	terminal  string // phaseTerminal 时的终态字符串
 	termErr   error
-	refreshes int  // §2.10 刷新计数（<5）
-	paused    bool // 暂停意愿（loop 循环顶与 Pause/Resume 读写）
-	canceled  bool // 取消意愿（排队期/刷新窗口也生效——Scheduler 无 ctx 的补偿，T13）
+	termAt    time.Time // 终态时刻（F2 淘汰排序键）
+	refreshes int       // §2.10 刷新计数（<5）
+	paused    bool      // 暂停意愿（loop 循环顶与 Pause/Resume 读写）
+	canceled  bool      // 取消意愿（排队期/刷新窗口也生效——Scheduler 无 ctx 的补偿，T13）
 
 	th eventThrottle // 进度事件节流器（跨 attempt 共享，防切换瞬间双发）
 }
@@ -129,15 +145,20 @@ type eventThrottle struct {
 
 // Manager 任务管理器：装配 Config/事件/Scheduler 互斥，宿主任务循环。
 type Manager struct {
-	cfg        Config
-	onEvent    func(Event)
-	eventEvery time.Duration
+	cfg            Config
+	onEvent        func(Event)
+	eventEvery     time.Duration
+	refreshTimeout time.Duration // 刷新调用超时（默认 defaultRefreshTimeout，测试可注入）
 
 	sched  *Scheduler    // TryLockDest/UnlockDest（owned 语义，§3.13）
 	sem    chan struct{} // 任务级信号量（自持，原因见文件头「信号量说明」）
 	tasks  map[string]*managedTask
 	mu     sync.Mutex
 	nextID atomic.Int64
+
+	closed   bool           // Close 后为真：Submit 拒绝、Resume/Retry 不复活（F2）
+	wg       sync.WaitGroup // 任务 goroutine（loop）计数：Close 等齐退出（F2）
+	maxTasks int            // 登记表上限（默认 1024；未导出，测试可注入，F2）
 
 	// taskTune 测试注入：压缩任务常数（ramp/采样/存档周期）。生产 nil。
 	taskTune func(*Task)
@@ -155,12 +176,14 @@ func NewManager(cfg Config, onEvent func(Event)) *Manager {
 		cfg.MaxConcurrentTasks = defaultMaxConcurrent
 	}
 	return &Manager{
-		cfg:        cfg,
-		onEvent:    onEvent,
-		eventEvery: eventEveryDefault,
-		sched:      NewScheduler(cfg.MaxConcurrentTasks),
-		sem:        make(chan struct{}, cfg.MaxConcurrentTasks),
-		tasks:      make(map[string]*managedTask),
+		cfg:            cfg,
+		onEvent:        onEvent,
+		eventEvery:     eventEveryDefault,
+		refreshTimeout: defaultRefreshTimeout,
+		sched:          NewScheduler(cfg.MaxConcurrentTasks),
+		sem:            make(chan struct{}, cfg.MaxConcurrentTasks),
+		tasks:          make(map[string]*managedTask),
+		maxTasks:       defaultMaxTasks,
 	}
 }
 
@@ -170,6 +193,9 @@ func NewManager(cfg Config, onEvent func(Event)) *Manager {
 // 损坏数据，§3.13）。mode 逐文件生效；opts 注入 Refresher（§2.10 自愈，
 // 缺省 401/403/412 直接失败）。
 func (m *Manager) Submit(lr protocol.LinkResult, relDir, cookieStr string, mode Mode, opts ...SubmitOpt) (string, error) {
+	if m.isClosed() {
+		return "", ErrClosed
+	}
 	if lr.FileName == "" {
 		return "", errors.New("feiwu: Submit: FileName 为空")
 	}
@@ -217,9 +243,16 @@ func (m *Manager) Submit(lr protocol.LinkResult, relDir, cookieStr string, mode 
 	}
 	mt.task = m.buildAttempt(mt, lr.URL) // 排队期 Get 可报 pending/已有断点的进度
 	m.mu.Lock()
+	if m.closed { // 注册临界区内复查（Close 可能与 Submit 并发；F2）
+		m.mu.Unlock()
+		m.sched.UnlockDest(absLower, true) // owned：Submit 成功才持有，失败路径手动归还
+		return "", ErrClosed
+	}
 	m.tasks[id] = mt
+	m.evictLocked() // F2：注册后过限先淘汰终态（新条目必存活）
 	m.mu.Unlock()
 
+	m.wg.Add(1) // 先 Add 后 go：Close 的 wg.Wait 不漏计（F2）
 	go m.loop(mt)
 	return id, nil
 }
@@ -307,8 +340,18 @@ func (m *Manager) emitFinal(mt *managedTask, state string, err error) {
 // 起跑前检查跳过）；自愈重跑在**同一槽位内**回到循环顶（换链不算新任务，
 // 不重新排队）。
 func (m *Manager) loop(mt *managedTask) {
+	defer m.wg.Done() // F2：Close 等齐 goroutine 的计数（Add 先于 go loop）
 	m.sem <- struct{}{}
 	defer func() { <-m.sem }()
+
+	// F1（审查）：任务级取消链根。一次 loop 生命周期（跨自愈换链的多次
+	// attempt）：runX 的 attempt ctx 与 Refresher 的 ctx 都从这里派生——
+	// Cancel 经 mt.cancel 掐根，刷新窗口内同样可达（旧实现刷新用
+	// context.Background 且无超时，回调挂起 = 任务 goroutine 永久阻塞且
+	// 持有 sem 槽位，Cancel 掐不到）。
+	runCtx, runCancel := context.WithCancel(context.Background())
+	mt.setCancel(runCancel)
+	defer func() { runCancel(); mt.setCancel(nil) }()
 
 	url := mt.lr.URL
 	for {
@@ -323,8 +366,7 @@ func (m *Manager) loop(mt *managedTask) {
 
 		tk := m.buildAttempt(mt, url)
 		mt.setRunning(tk, url)
-		ctx, cancel := context.WithCancel(context.Background())
-		mt.setCancel(cancel)
+		ctx, cancel := context.WithCancel(runCtx) // attempt 从任务根派生（用户取消 = 外部令牌语义不变）
 
 		var err error
 		if mt.mode == ModeB {
@@ -333,7 +375,8 @@ func (m *Manager) loop(mt *managedTask) {
 			err = tk.runA(ctx)
 		}
 		cancel()
-		mt.setCancel(nil)
+		// 此处不 setCancel(nil)：mt.cancel 指向 runCancel——刷新窗口内
+		// Cancel 仍可达（见上 F1）。
 
 		switch {
 		case err == nil:
@@ -347,7 +390,7 @@ func (m *Manager) loop(mt *managedTask) {
 			m.finish(mt, "canceled", err)
 			return
 		}
-		if m.maybeRefresh(mt, &url, err) {
+		if m.maybeRefresh(runCtx, mt, &url, err) {
 			continue // 新 URL 重跑整个下载尝试；W 从 .qmeta 读回无损续传
 		}
 		m.finish(mt, "error", err)
@@ -359,7 +402,9 @@ func (m *Manager) loop(mt *managedTask) {
 // 401/403/412 → 刷新次数 <5 → Refresher 换新 URL。取不到（错误/空串）或
 // 与旧相同 → false（调用方中止保留断点）；换到新链 → true（重跑）。
 // **绝不在此之外的任何层刷新**——worker 各自刷新 = 一次失效几百次取链。
-func (m *Manager) maybeRefresh(mt *managedTask, url *string, err error) bool {
+// runCtx 是 loop 建的任务级取消链根（F1）：refresher 的 ctx 从它派生
+// （Cancel 可达）再包一层工程超时；两层任一到期都按取不到新链处理。
+func (m *Manager) maybeRefresh(runCtx context.Context, mt *managedTask, url *string, err error) bool {
 	if !causeStatusIn(err, http.StatusUnauthorized, http.StatusForbidden, http.StatusPreconditionFailed) {
 		return false
 	}
@@ -369,7 +414,9 @@ func (m *Manager) maybeRefresh(mt *managedTask, url *string, err error) bool {
 	if refresher == nil || used >= refreshMax {
 		return false
 	}
-	newURL, rerr := refresher(context.Background())
+	rctx, rcancel := context.WithTimeout(runCtx, m.refreshTimeout)
+	newURL, rerr := refresher(rctx)
+	rcancel()
 	mt.mu.Lock()
 	mt.refreshes++
 	mt.mu.Unlock()
@@ -383,10 +430,14 @@ func (m *Manager) maybeRefresh(mt *managedTask, url *string, err error) bool {
 
 // finish 终态收尾：释放同路径登记 → 记终态 → 直发终态帧。顺序保证
 // Get 观察到终态时锁必已释放（Retry/新 Submit 立即可复用该路径）。
+// 新终态可能把登记表推过上限（此前全存活顶满时）→ 触发终态淘汰（F2）。
 func (m *Manager) finish(mt *managedTask, state string, err error) {
 	m.sched.UnlockDest(mt.absLower, true) // owned：Submit 成功即持有
 	mt.setTerminal(state, err)
 	m.emitFinal(mt, state, err)
+	m.mu.Lock()
+	m.evictLocked()
+	m.mu.Unlock()
 }
 
 // finishCanceled 排队期/刷新窗口/挂起期的取消收尾（runX 不在跑，
@@ -435,6 +486,9 @@ func (m *Manager) Pause(id string) {
 
 // Resume 恢复：清暂停意愿 → 重新排队（buildAttempt 从 .qmeta 无损续传）。
 func (m *Manager) Resume(id string) {
+	if m.isClosed() { // F2：Close 后不复活（复活职责在 web 层 §6.2 持久化）
+		return
+	}
 	mt := m.lookup(id)
 	if mt == nil {
 		return
@@ -451,6 +505,7 @@ func (m *Manager) Resume(id string) {
 	if tk != nil && tk.watchdog != nil {
 		tk.watchdog.SetPaused(false) // T11 接线（对旧 attempt 幂等无害）
 	}
+	m.wg.Add(1)
 	go m.loop(mt)
 }
 
@@ -486,6 +541,9 @@ func (m *Manager) Cancel(id string) {
 // 开始）。运行中/排队中无效（记日志）。终态重试需重新 TryLockDest
 // （路径可能已被其他任务占用）。
 func (m *Manager) Retry(id string) {
+	if m.isClosed() { // F2：Close 后不复活（复活职责在 web 层 §6.2 持久化）
+		return
+	}
 	mt := m.lookup(id)
 	if mt == nil {
 		return
@@ -509,7 +567,70 @@ func (m *Manager) Retry(id string) {
 	mt.refreshes = 0
 	mt.phase = phaseQueued
 	mt.mu.Unlock()
+	m.wg.Add(1)
 	go m.loop(mt)
+}
+
+// Close 关闭 Manager（F2 审查）：① 取消所有未终态任务（运行/排队经取消
+// 链与标志，暂停由 finishCanceled 兜底删半成品——与逐个 Cancel 等价）；
+// ② 等待全部任务 goroutine（loop）退出后才返回——runX 内部的
+// worker/监视/合并线程均由 runX 自行 join，loop 退出即全链收口；
+// ③ 幂等——重复调用直接返回。Close 后 Submit 报 ErrClosed，Resume/Retry
+// 不再复活任务；Get 对未被淘汰的登记条目仍可用。
+func (m *Manager) Close() {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return // 幂等
+	}
+	m.closed = true
+	mts := make([]*managedTask, 0, len(m.tasks))
+	for _, mt := range m.tasks {
+		mts = append(mts, mt)
+	}
+	m.mu.Unlock()
+
+	for _, mt := range mts {
+		m.Cancel(mt.id)
+	}
+	m.wg.Wait() // 全部 loop 退出（Add 先于 go loop，无漏计、无漏等）
+}
+
+// isClosed Close 状态查询（Submit/Resume/Retry 入口快速失败）。
+func (m *Manager) isClosed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closed
+}
+
+// evictLocked 终态淘汰（F2 审查）：登记表超过 maxTasks 时按终态时间最早
+// 淘汰**已终态**条目——Cookie/URL 等上下文随条目释放（Manager 不再持有
+// 引用）；存活条目（排队/运行/暂停——dest 锁或槽位仍在用）绝不淘汰，
+// 全存活顶满时允许暂时超限（有终态时 finish/后续 Submit 会再触发）。
+// 被淘汰后 Get 返回 ErrTaskNotFound、Retry 无效——任务持久化与复活由
+// web 层负责（§6.2 持久化上下文：断点在盘（.qmeta），web 层可重新
+// Submit 复活），本层不保留尸位登记。调用方须持有 m.mu。
+func (m *Manager) evictLocked() {
+	if len(m.tasks) <= m.maxTasks {
+		return
+	}
+	type ent struct {
+		id string
+		at time.Time
+	}
+	var terms []ent
+	for id, mt := range m.tasks {
+		mt.mu.Lock()
+		if mt.phase == phaseTerminal {
+			terms = append(terms, ent{id, mt.termAt})
+		}
+		mt.mu.Unlock()
+	}
+	sort.Slice(terms, func(i, j int) bool { return terms[i].at.Before(terms[j].at) })
+	n := min(len(m.tasks)-m.maxTasks, len(terms))
+	for _, e := range terms[:n] {
+		delete(m.tasks, e.id)
+	}
 }
 
 // lookup 按 id 取任务登记（不存在返回 nil）。
@@ -572,6 +693,7 @@ func (mt *managedTask) setCancel(c context.CancelFunc) {
 func (mt *managedTask) setTerminal(state string, err error) {
 	mt.mu.Lock()
 	mt.phase, mt.terminal, mt.termErr = phaseTerminal, state, err
+	mt.termAt = time.Now() // F2 淘汰排序键
 	mt.mu.Unlock()
 }
 
