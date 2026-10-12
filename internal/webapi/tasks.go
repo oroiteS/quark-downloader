@@ -55,16 +55,19 @@ type taskManager interface {
 }
 
 // createTasksRequest POST /api/tasks 请求体（字段名是 §6.2 契约）：
-// source=share 时须带 pwd_id 且 stoken/passcode 至少其一（stoken 缺省时
-// 用 passcode 走 ShareToken 现换）；dest 为相对 DestDir 的子目录前缀
-// （G5「建任务时可改」——受 Submit 签名约束只支持子目录级覆盖，拒绝
-// 逃逸）；mode "a"|"b" 缺省 ModeA。
+// source=share 时带 pwd_id，或带 sid 引用 parse 会话（T13 契约补全：
+// 会话已持有现换好的 stoken，免重复 ShareToken——直传字段优先，sid
+// 只补缺省）；stoken 缺省时无条件尝试 ShareToken(pwd_id, passcode)
+// （passcode 可空=公开分享合法形态），现换失败才 502 如实拒绝；dest
+// 为相对 DestDir 的子目录前缀（G5「建任务时可改」——受 Submit 签名
+// 约束只支持子目录级覆盖，拒绝逃逸）；mode "a"|"b" 缺省 ModeA。
 type createTasksRequest struct {
 	Source   string   `json:"source"`
 	FIDs     []string `json:"fids"`
 	PwdID    string   `json:"pwd_id"`
 	Stoken   string   `json:"stoken"`
 	Passcode string   `json:"passcode"`
+	SID      string   `json:"sid"`
 	Dest     string   `json:"dest"`
 	Mode     string   `json:"mode"`
 }
@@ -123,14 +126,36 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 		return
 	}
 	if req.Source == "share" {
+		// sid 引用 parse 会话（T13 契约补全）：直传字段优先，sid 只补
+		// 缺省；sid 提供但未命中→404（与 /api/links 同语义，提示重新
+		// parse）——不静默降级直传半残路径。
+		if req.SID != "" {
+			shareSessionsMu.Lock()
+			ss := shareSessions[req.SID]
+			shareSessionsMu.Unlock()
+			if ss == nil {
+				writeError(c, http.StatusNotFound, codeNoShareSession,
+					"分享会话不存在或已失效, 请重新解析")
+				return
+			}
+			pwd, pass, st := ss.snapshot()
+			if req.PwdID == "" {
+				req.PwdID = pwd
+			}
+			if req.Passcode == "" {
+				req.Passcode = pass
+			}
+			if req.Stoken == "" {
+				req.Stoken = st
+			}
+		}
 		if req.PwdID == "" {
-			writeError(c, http.StatusBadRequest, codeInvalidTasksRequest, "share 模式须带 pwd_id")
+			writeError(c, http.StatusBadRequest, codeInvalidTasksRequest,
+				"share 模式须带 pwd_id 或 sid（先走 /api/share/parse）")
 			return
 		}
-		if req.Stoken == "" && req.Passcode == "" {
-			writeError(c, http.StatusBadRequest, codeInvalidTasksRequest, "share 模式须带 stoken 或 passcode（提取码）")
-			return
-		}
+		// stoken 缺省不再预校验拒绝：无条件走下方 ShareToken 现换
+		// （passcode 空=公开分享合法形态），现换失败 502 如实。
 	}
 	if a.manager == nil {
 		writeError(c, http.StatusInternalServerError, codeInternal, "下载管理器未装配")

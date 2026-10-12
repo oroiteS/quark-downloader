@@ -219,6 +219,15 @@ func (u *fakeUpstream) writeList(w http.ResponseWriter, entries []protocol.FileE
 	fmt.Fprintf(w, `{"status":200,"code":0,"data":{"list":%s,"metadata":{"_total":%d}}}`, b, len(entries))
 }
 
+// requestSnapshot 返回全部上游请求的快照（断言用）。
+func (u *fakeUpstream) requestSnapshot() []upstreamReq {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	out := make([]upstreamReq, len(u.requests))
+	copy(out, u.requests)
+	return out
+}
+
 // downloadRequests 返回全部 download 请求的解析后 body。
 func (u *fakeUpstream) downloadRequests() []dlBody {
 	u.mu.Lock()
@@ -1311,5 +1320,116 @@ func TestCreateTasksPersistsMode(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].Mode != "b" {
 		t.Fatalf("列表 mode = %+v, 期望 mode=b 透出", list)
+	}
+}
+
+// ---- fix round 2：sid 引用建任务 + 公开分享空提取码现换（T13 契约补全）----
+
+// TestCreateTasksBySID sid 命中会话：pwd_id/stoken 从 parse 会话补齐，
+// 不再发 sharepage/token 现换请求（会话 stoken 已在）。
+func TestCreateTasksBySID(t *testing.T) {
+	up := &fakeUpstream{
+		share: map[string][]protocol.FileEntry{
+			"d0": {{FID: "f1", FileName: "a.bin", Size: 512, ShareFIDToken: "tk1"}},
+		},
+		links: map[string]string{"f1": "https://d.quark.cn/f1?k=1"},
+	}
+	fm := &fakeManager{}
+	paths := taskTestPaths(t)
+	app := newTasksTestApp(t, up, fm, taskTestSettings(filepath.Join(paths.DataDir, "dl")), paths)
+
+	shareSessionsMu.Lock()
+	shareSessions["sid-ok"] = &shareSession{pwdID: "pw-sid", passcode: "", stoken: "st-sid"}
+	shareSessionsMu.Unlock()
+	t.Cleanup(func() {
+		shareSessionsMu.Lock()
+		delete(shareSessions, "sid-ok")
+		shareSessionsMu.Unlock()
+	})
+
+	w := doReq(t, app.Router(), http.MethodPost, "/api/tasks", map[string]any{
+		"source": "share", "fids": []string{"d0"}, "sid": "sid-ok",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d, 期望 200（body=%s）", w.Code, w.Body)
+	}
+	var body struct {
+		TaskIDs []string `json:"task_ids"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if len(body.TaskIDs) != 1 || body.TaskIDs[0] != "t1" {
+		t.Fatalf("task_ids = %v, 期望 [t1]", body.TaskIDs)
+	}
+	for _, rq := range up.requestSnapshot() {
+		if rq.Path == "/1/clouddrive/share/sharepage/token" {
+			t.Fatal("sid 命中时不应再发 sharepage/token 现换请求（会话 stoken 已在）")
+		}
+	}
+	dls := up.downloadRequests()
+	if len(dls) == 0 || dls[0].PwdID != "pw-sid" || dls[0].Stoken != "st-sid" {
+		t.Fatalf("download pwd_id/stoken = %+v, 期望会话值 pw-sid/st-sid", dls)
+	}
+}
+
+// TestCreateTasksBadSID sid 未命中：404 no_share_session（与 links 同语义）。
+func TestCreateTasksBadSID(t *testing.T) {
+	up := &fakeUpstream{}
+	fm := &fakeManager{}
+	paths := taskTestPaths(t)
+	app := newTasksTestApp(t, up, fm, taskTestSettings(filepath.Join(paths.DataDir, "dl")), paths)
+
+	w := doReq(t, app.Router(), http.MethodPost, "/api/tasks", map[string]any{
+		"source": "share", "fids": []string{"d0"}, "sid": "sid-nope",
+	})
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("状态码 = %d, 期望 404（body=%s）", w.Code, w.Body)
+	}
+	var errBody struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &errBody); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v（body=%s）", err, w.Body)
+	}
+	if got := errBody.Error.Code; got != "no_share_session" {
+		t.Fatalf("error.code = %q, 期望 no_share_session（body=%s）", got, w.Body)
+	}
+}
+
+// TestCreateTasksPublicShareNoPasscode 公开分享（无提取码无 stoken 直传）：
+// stoken 缺失时无条件现换（passcode 空=合法形态），失败才拒绝。
+func TestCreateTasksPublicShareNoPasscode(t *testing.T) {
+	up := &fakeUpstream{
+		share: map[string][]protocol.FileEntry{
+			"d0": {{FID: "f2", FileName: "b.bin", Size: 256, ShareFIDToken: "tk2"}},
+		},
+		stoken: "st-fresh",
+		links:  map[string]string{"f2": "https://d.quark.cn/f2?k=2"},
+	}
+	fm := &fakeManager{}
+	paths := taskTestPaths(t)
+	app := newTasksTestApp(t, up, fm, taskTestSettings(filepath.Join(paths.DataDir, "dl")), paths)
+
+	w := doReq(t, app.Router(), http.MethodPost, "/api/tasks", map[string]any{
+		"source": "share", "fids": []string{"d0"}, "pwd_id": "pw-pub",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d, 期望 200——公开分享空 passcode 应现换 stoken（body=%s）", w.Code, w.Body)
+	}
+	sawToken := false
+	for _, rq := range up.requestSnapshot() {
+		if rq.Path == "/1/clouddrive/share/sharepage/token" {
+			sawToken = true
+		}
+	}
+	if !sawToken {
+		t.Fatal("stoken 缺失应发出 sharepage/token 现换请求")
+	}
+	dls := up.downloadRequests()
+	if len(dls) == 0 || dls[0].Stoken != "st-fresh" {
+		t.Fatalf("download stoken = %+v, 期望现换值 st-fresh", dls)
 	}
 }

@@ -82,6 +82,9 @@ func TestManualAPI(t *testing.T) {
 	if file == nil {
 		t.Fatal("分享内未找到文件（含下钻一层）")
 	}
+	if file.name == "" {
+		t.Fatalf("选中文件 name 为空（fid=%s）——服务端 file_name 透出异常", mask(file.fid))
+	}
 	t.Logf("选中文件: name=%q size=%d fid=%s", file.name, file.size, mask(file.fid))
 
 	// ---- 建任务（dest 相对前缀，最终落在 settings.destDir 下）----
@@ -89,7 +92,7 @@ func TestManualAPI(t *testing.T) {
 	relPrefix := filepath.ToSlash(filepath.Join("feiwu-manual-test", randHex(t, 4)))
 	defer os.RemoveAll(filepath.Join(destDir, "feiwu-manual-test"))
 
-	taskID := createShareTask(t, baseURL, pwdID, passcode, file, relPrefix)
+	taskID := createShareTask(t, baseURL, sid, file, relPrefix)
 
 	// ---- SSE 至 task_final ----
 	finalState := readSSEUntilFinal(t, baseURL, taskID)
@@ -287,7 +290,7 @@ func filesFrom(raw any) []manualFile {
 		m, _ := it.(map[string]any)
 		f := manualFile{}
 		f.fid, _ = m["fid"].(string)
-		f.name, _ = m["name"].(string)
+		f.name, _ = m["file_name"].(string) // FileEntry json tag 是 file_name（api.go）——曾误读 "name" 致 name 恒空
 		if m["dir"] == true {
 			f.dir = true
 		}
@@ -374,15 +377,15 @@ func settingsDestDir(t *testing.T, base string) string {
 	return dir
 }
 
-func createShareTask(t *testing.T, base, pwdID, passcode string, f *manualFile, relPrefix string) string {
+func createShareTask(t *testing.T, base, sid string, f *manualFile, relPrefix string) string {
 	t.Helper()
 	req := map[string]any{
-		"source":   "share",
-		"fids":     []string{f.fid},
-		"pwd_id":   pwdID,
-		"passcode": passcode,
-		"dest":     relPrefix,
-		// stoken 不传：服务端走 ShareToken 现换闭环（T13 sid×POST 取舍）
+		"source": "share",
+		"fids":   []string{f.fid},
+		"sid":    sid,
+		"dest":   relPrefix,
+		// sid 引用 parse 会话（与服务端免重复现换一致的前端物流）；
+		// 无 sid 直传 pwd_id+passcode 路径由离线测试覆盖
 	}
 	payload, _ := json.Marshal(req)
 	code, body := apiPost(t, base, "/api/tasks", payload)
