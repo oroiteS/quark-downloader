@@ -128,11 +128,17 @@ func startServer(t *testing.T) string {
 	root := filepath.Dir(filepath.Dir(wd))          // internal/webapi → 仓库根
 	cmd := exec.Command("go", "run", "./cmd/feiwu") // 生命周期归 t.Cleanup（SIGINT 优雅关→Kill 兜底）
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(),
+	// 隔离数据目录：真机测试不污染用户真实数据目录（settings/cookies/
+	// tasks 全落临时目录）。用户显式传入 FEIWU_DATA_DIR 时尊重之。
+	env := append(os.Environ(),
 		"FEIWU_NO_BROWSER=1",
 		"GOCACHE="+filepath.Join(root, ".gocache"), // 环境契约：离线本地缓存
 		"GOPROXY=off",
 	)
+	if os.Getenv("FEIWU_DATA_DIR") == "" {
+		env = append(env, "FEIWU_DATA_DIR="+t.TempDir())
+	}
+	cmd.Env = env
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatalf("StderrPipe: %v", err)

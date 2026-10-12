@@ -134,6 +134,37 @@ func TestShareParseFullChain(t *testing.T) {
 	}
 }
 
+// TestShareParseMixedKoulingWithLink 混合文本（口令标记+有效链接+提取码）
+// → 正常解析链：有 PwdID 即解析，IsKouling 不再抢先（口令提示只留给
+// 「仅口令、无链接可解析」的文本——brief 契约本意）。
+func TestShareParseMixedKoulingWithLink(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	up := shareTestUpstream()
+	app := newTasksTestApp(t, up, &fakeManager{}, taskTestSettings("/tmp/d"), taskTestPaths(t))
+
+	w := doReq(t, app.Router(), http.MethodPost, "/api/share/parse",
+		map[string]string{"text": "復制这条信息打开夸克网盘/~a1b2c3d4~:/ 链接：https://pan.quark.cn/s/abc123 提取码：xp99"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d, 期望 200（body=%s）", w.Code, w.Body)
+	}
+	var pr parseResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &pr); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	if pr.Kouling {
+		t.Fatal("混合文本含有效链接却被当口令拒绝（kouling=true）——PwdID 优先级应高于 IsKouling")
+	}
+	if pr.SID == "" {
+		t.Fatal("sid 为空, 期望会话引用 id")
+	}
+	if pr.PwdID != "abc123" || pr.Passcode != "xp99" {
+		t.Fatalf("pwd_id=%q passcode=%q, 期望 abc123/xp99", pr.PwdID, pr.Passcode)
+	}
+	if len(pr.Files) != 2 {
+		t.Fatalf("根目录文件数 = %d, 期望 2", len(pr.Files))
+	}
+}
+
 // TestShareFilesBySession files 经 sid 导航子目录（会话持有 stoken）。
 func TestShareFilesBySession(t *testing.T) {
 	gin.SetMode(gin.TestMode)

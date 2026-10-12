@@ -92,8 +92,14 @@ func (a *App) handleShareParse(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, codeInvalidShareText, "未识别到分享链接")
 		return
 	}
-	if ref.IsKouling {
-		// 口令无公开解析接口，如实引导（brief 逐字提示文案）。
+	if ref.PwdID == "" {
+		// 仅口令（无链接可解析）：口令无公开解析接口，如实引导
+		// （brief 逐字提示文案）。PwdID 优先：混合文本（口令标记+
+		// 有效链接）走下方正常解析链——有链接就不该被口令提示拒绝。
+		if !ref.IsKouling {
+			writeError(c, http.StatusBadRequest, codeInvalidShareText, "未识别到分享链接")
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"kouling": true, "hint": "口令请改用分享链接"})
 		return
 	}
