@@ -234,7 +234,14 @@ func (m *Manager) Submit(lr protocol.LinkResult, relDir, cookieStr string, mode 
 	// E7（Task 8）：opts 解析与参数校验同区——负档位是参数错误，必须在
 	// 占 dest 锁前拒绝（失败路径不留任何登记）。多个 opts 时后者覆盖
 	// 先者（与 Refresher 同语义）。
-	threads := m.cfg.Threads // SubmitOpt.Threads=0 的缺省档位
+	//
+	// cfg 读侧临界区（Task 13, Ruling T13-R1）：SetDestDir 运行中可被
+	// 并发调用（PUT /api/settings 热应用），Submit 的 cfg.Threads/
+	// cfg.DestDir 读取须与之间步化——锁内取值、锁外使用（IO 不持锁）。
+	m.mu.Lock()
+	cfgThreads, cfgDestDir := m.cfg.Threads, m.cfg.DestDir
+	m.mu.Unlock()
+	threads := cfgThreads // SubmitOpt.Threads=0 的缺省档位
 	var refresher func(ctx context.Context) (string, error)
 	for _, o := range opts {
 		if o.Threads < 0 {
@@ -248,7 +255,7 @@ func (m *Manager) Submit(lr protocol.LinkResult, relDir, cookieStr string, mode 
 		}
 	}
 	threads = min(threads, effMax) // >512 钳 512（§3.3 有效并发上限）
-	dest := filepath.Join(m.cfg.DestDir, relDir, lr.FileName)
+	dest := filepath.Join(cfgDestDir, relDir, lr.FileName)
 	abs, err := filepath.Abs(dest)
 	if err != nil {
 		return "", fmt.Errorf("feiwu: Submit: 解析目标路径失败: %w", err)
@@ -689,6 +696,17 @@ func (m *Manager) Retry(id string) {
 	mt.mu.Unlock()
 	m.wg.Add(1)
 	go m.loop(mt)
+}
+
+// SetDestDir 热更新下载根目录（Task 13, Ruling T13-R1：PUT /api/settings
+// 热应用——webapi 侧 absDest 与本侧 Join(cfg.DestDir) 两侧一致）。锁内
+// 替换, 只影响后续 Submit 的 dest 计算；运行中任务的 mt.dest 在 Submit
+// 期已算好不受影响；TryLockDest 互斥按完整路径, 新旧目录任务不交叉。
+// Submit 的读侧已同临界区步化（见 Submit 内 cfg 读侧注释）。
+func (m *Manager) SetDestDir(dir string) {
+	m.mu.Lock()
+	m.cfg.DestDir = dir
+	m.mu.Unlock()
 }
 
 // Close 关闭 Manager（F2 审查 + E6 最终审查）：**停止全部任务并保留断点**。

@@ -583,13 +583,21 @@ func TestErrorCodeConstantsFrozen(t *testing.T) {
 		"links_failed":          codeLinksFailed,
 		"expand_failed":         codeExpandFailed,
 		"capacity_failed":       codeCapacityFailed,
+		// Task 13 增码（29 项冻结）：解析/网盘/直链/设置端点错误面。
+		"invalid_share_text":    codeInvalidShareText,
+		"share_list_failed":     codeShareListFailed,
+		"drive_list_failed":     codeDriveListFailed,
+		"no_share_session":      codeNoShareSession,
+		"invalid_links_request": codeInvalidLinksReq,
+		"invalid_settings":      codeInvalidSettings,
+		"save_settings_failed":  codeSaveSettingsFailed,
 	}
 	for wire, constant := range frozen {
 		if wire != constant {
 			t.Errorf("错误码常量漂移: wire=%q 常量=%q（重命名须同步系列 4 前端）", wire, constant)
 		}
 	}
-	if len(frozen) != 22 {
-		t.Fatalf("冻结表条目 = %d, 期望 22（增删须过契约评审）", len(frozen))
+	if len(frozen) != 29 {
+		t.Fatalf("冻结表条目 = %d, 期望 29（增删须过契约评审）", len(frozen))
 	}
 }

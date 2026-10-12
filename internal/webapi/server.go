@@ -140,6 +140,22 @@ func (a *App) buildRouter() *gin.Engine {
 	api.POST("/tasks/:id/cancel", a.handleTaskCancel)
 	api.POST("/tasks/:id/retry", a.handleTaskRetry)
 
+	// 分享解析与网盘浏览（Task 13，share.go：parse 建内存会话 sid 引用，
+	// files 经会话导航；drive 直透）。
+	api.POST("/share/parse", a.handleShareParse)
+	api.GET("/share/files", a.handleShareFiles)
+	api.GET("/drive/files", a.handleDriveFiles)
+
+	// 直链获取与导出（Task 13，links.go：打分透出 + expires_hint；
+	// export 五格式文本）。
+	api.POST("/links", a.handleLinks)
+	api.POST("/links/export", a.handleLinksExport)
+
+	// 设置读写（Task 13，settings.go：PUT 热应用——destDir 同步
+	// manager（T13-R1）、threads/max 即时生效于后续预算（T13-R2））。
+	api.GET("/settings", a.handleSettingsGet)
+	api.PUT("/settings", a.handleSettingsPut)
+
 	registerStatic(r)
 	r.NoRoute(func(c *gin.Context) {
 		// /api（含 /api/ 前缀子路径）的未匹配路径保持 JSON 语义（客户端
@@ -255,4 +271,12 @@ const (
 	codeLinksFailed         = "links_failed"          // 502 批量取直链失败
 	codeExpandFailed        = "expand_failed"         // 502 目录展开失败
 	codeCapacityFailed      = "capacity_failed"       // 502 网盘容量查询失败
+	// Task 13 增码（29 项冻结）：解析/网盘/直链/设置端点的错误面。
+	codeInvalidShareText   = "invalid_share_text"    // 400 分享文案无链接/口令不可解析
+	codeShareListFailed    = "share_list_failed"     // 502 分享目录列表失败
+	codeDriveListFailed    = "drive_list_failed"     // 502 网盘目录列表失败
+	codeNoShareSession     = "no_share_session"      // 404 分享会话 sid 无效/过期
+	codeInvalidLinksReq    = "invalid_links_request" // 400 直链/导出请求参数错误
+	codeInvalidSettings    = "invalid_settings"      // 400 设置值非法（theme/档位/目录）
+	codeSaveSettingsFailed = "save_settings_failed"  // 500 settings.json 落盘失败
 )

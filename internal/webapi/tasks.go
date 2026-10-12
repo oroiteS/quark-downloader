@@ -49,6 +49,9 @@ type taskManager interface {
 	Retry(id string)
 	// Close 停止全部任务并保留断点（E6）；幂等且并发安全。
 	Close()
+	// SetDestDir 热更新下载根目录（Task 13, Ruling T13-R1：PUT
+	// /api/settings 热应用——与 webapi 侧 absDest 同源一致）。
+	SetDestDir(dir string)
 }
 
 // createTasksRequest POST /api/tasks 请求体（字段名是 §6.2 契约）：
@@ -194,12 +197,14 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 
 	// ③ 预算分配（E7/§3.13）：cap=用户并发档位、concurrency=同时任务数；
 	// 零值 settings 防御为 ≥1（AllocateBudget 对 cap<1 只保下限）。
+	// settings 快照（Task 13：PUT 热应用与创建并发时的读写一致）。
+	snap := a.settingsSnapshot()
 	sizes := make([]int64, len(items))
 	for i, it := range items {
 		sizes[i] = it.size
 	}
 	budget := engine.AllocateBudget(sizes,
-		max(a.settings.Threads, 1), max(a.settings.MaxConcurrentTasks, 1))
+		max(snap.Threads, 1), max(snap.MaxConcurrentTasks, 1))
 
 	// ④ 逐项 Submit（一文件一任务）＋ ⑤ TaskCtx 落盘。
 	var (
@@ -227,7 +232,7 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 			Token:     it.token,
 			FromShare: req.Source == "share",
 			RelDir:    relDir,
-			Dest:      absDest(a.settings.DestDir, relDir, it.name),
+			Dest:      absDest(snap.DestDir, relDir, it.name),
 			Size:      it.size,
 			Mode:      modeString(mode), // Task 10：DTO mode 与 retry 复活读回
 			CreatedAt: createdAt,
@@ -627,7 +632,7 @@ func (a *App) handleTaskRetry(c *gin.Context) {
 	newID, err := a.manager.Submit(
 		protocol.LinkResult{FID: tc.FID, FileName: tc.FileName, Size: tc.Size, URL: url},
 		tc.RelDir, cookieStr, mode,
-		engine.SubmitOpt{Threads: max(a.settings.Threads, 1), Refresher: refresher})
+		engine.SubmitOpt{Threads: max(a.settingsSnapshot().Threads, 1), Refresher: refresher})
 	if err != nil {
 		switch {
 		case errors.Is(err, engine.ErrClosed):

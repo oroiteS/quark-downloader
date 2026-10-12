@@ -38,13 +38,21 @@ import (
 // （如模拟同路径互斥拒绝）。Task 10 扩展：gets 模拟 Get 快照（缺省
 // ErrTaskNotFound=已淘汰/不存在），控制面调用记录进 calls（"pause:t1"）。
 type fakeManager struct {
-	mu      sync.Mutex
-	submits []fakeSubmitCall
-	nextID  int
-	closed  int
-	submitF func(call fakeSubmitCall) (string, error)
-	gets    map[string]engine.Progress // id → Get 快照；无条目 = ErrTaskNotFound
-	calls   []string                   // 控制调用记录（action:id）
+	mu          sync.Mutex
+	submits     []fakeSubmitCall
+	nextID      int
+	closed      int
+	submitF     func(call fakeSubmitCall) (string, error)
+	gets        map[string]engine.Progress // id → Get 快照；无条目 = ErrTaskNotFound
+	calls       []string                   // 控制调用记录（action:id）
+	setDestDirs []string                   // SetDestDir 调用记录（Task 13 热应用断言）
+}
+
+// SetDestDir 记录调用（fake 不做语义——热应用行为由真实 Manager 保证）。
+func (f *fakeManager) SetDestDir(dir string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setDestDirs = append(f.setDestDirs, dir)
 }
 
 // fakeSubmitCall 一次 Submit 调用的完整快照。

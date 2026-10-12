@@ -91,7 +91,7 @@ func (a *App) restoreTasks(ctx context.Context) error {
 		id, err := a.manager.Submit(
 			protocol.LinkResult{FID: tc.FID, FileName: tc.FileName, Size: tc.Size, URL: url},
 			tc.RelDir, cookieStr, mode,
-			engine.SubmitOpt{Threads: max(a.settings.Threads, 1), Refresher: refresher})
+			engine.SubmitOpt{Threads: max(a.settingsSnapshot().Threads, 1), Refresher: refresher})
 		if err != nil {
 			slog.Warn("feiwu: 恢复任务提交失败", "fid", tc.FID, "dest", tc.Dest, "err", err)
 			tc.NeedsReparse = true
