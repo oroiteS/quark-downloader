@@ -73,7 +73,7 @@ func (a *App) Router() *gin.Engine { return a.router }
 // Start 启动钩子：恢复链入口（main 在监听前调用一次）。
 //
 //	restoreSession（session.go，D9：Cookie 恢复 + keepalive 启动）
-//	restoreTasks（Task 11：tasks.json 恢复 + 重新提交，现为空方法位）
+//	restoreTasks（resume.go，Task 11：tasks.json 恢复 + 重新提交）
 func (a *App) Start(ctx context.Context) error {
 	if err := a.restoreSession(ctx); err != nil {
 		return fmt.Errorf("恢复会话: %w", err)
@@ -83,9 +83,6 @@ func (a *App) Start(ctx context.Context) error {
 	}
 	return nil
 }
-
-// restoreTasks 任务恢复钩子（Task 11 挂载位）。
-func (a *App) restoreTasks(context.Context) error { return nil }
 
 // Close 关闭钩子（main 挂 http.Server.RegisterOnShutdown；Shutdown 开始
 // 即触发，让 SSE 长连接先行退出——排空不被 5s 预算拖满后强关）。幂等。

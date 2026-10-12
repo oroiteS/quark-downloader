@@ -486,6 +486,13 @@ func (a *App) taskDTOFromCtx(tc store.TaskCtx) taskDTO {
 		d.Done = tc.Size
 		return d
 	}
+	if tc.NeedsReparse { // 恢复链如实标注（Ruling T11-R1）：不可重取或
+		// 恢复期重取失败的条目——needs_reparse 终态，绝不静默（Focus #3）。
+		d.ID = "ctx:" + tc.FID
+		d.State = "needs_reparse"
+		d.NeedsReparse = true
+		return d
+	}
 	d.ID = tc.EngineID
 	if tc.EngineID == "" { // 残缺条目（落盘中断等）：按历史终态透出
 		d.State = "finished"

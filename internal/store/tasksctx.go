@@ -6,6 +6,7 @@ package store
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
 	"sync"
 )
@@ -36,6 +37,13 @@ type TaskCtx struct {
 	// 路径都需要,而 §6.2 原字段清单无此项(控制者裁决追加,Exists 同例
 	// 的最小扩展)。空值按 "a" 缺省语义读回(旧数据兼容)。
 	Mode string `json:"mode,omitempty"`
+	// NeedsReparse 恢复链的如实标注(Task 11,控制者裁决 Ruling T11-R1
+	// 追加,Exists/Mode 同例):CanRefresh=false(上下文不足以重取直链)
+	// 或恢复期重取直链失败的条目置真——GET /api/tasks 透出
+	// needs_reparse 终态,绝不静默(Review Focus #3:磁盘无完整文件而
+	// 显示「完成」正是红线要防的静默失败形态)。用户 retry 复活或重新
+	// 解析创建成功后随 TaskCtx 覆盖而消除。
+	NeedsReparse bool `json:"needsReparse,omitempty"`
 }
 
 // CanRefresh 可重取判定。§6.2 原版逐字:fid 非空 且(非分享 或
@@ -68,7 +76,12 @@ func LoadTasks(p Paths) []TaskCtx {
 	}
 	var ts []TaskCtx
 	if err := json.Unmarshal(b, &ts); err != nil {
-		return nil // 坏 JSON → 无任务(下次 Save 覆盖自愈)
+		// 坏 JSON → 无任务(下次 Save 覆盖自愈)。自愈是可用性优先,但
+		// 静默会让全部旧任务的续传上下文消失而无从察觉——记 Warn
+		// 如实相告(T4 遗留 deferred,T11 恢复链首个消费前补)。
+		slog.Warn("feiwu: tasks.json 损坏,旧任务不自动续传(下次保存覆盖自愈)",
+			"file", p.TasksFile, "err", err)
+		return nil
 	}
 	return ts
 }
