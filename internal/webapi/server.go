@@ -14,7 +14,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"quark-downloader/internal/engine"
 	"quark-downloader/internal/protocol"
 	"quark-downloader/internal/store"
 )
@@ -24,7 +23,7 @@ type Deps struct {
 	Paths    store.Paths        // 数据目录定位结果（G7）
 	Settings store.Settings     // 启动时加载的设置（Task 13 的 GET/PUT /api/settings 读写它）
 	Secrets  *store.SecretStore // Cookie 加密存取（Task 6 会话装配消费）
-	Manager  *engine.Manager    // 下载管理器；Task 9 前无引擎交互，可 nil 占位
+	Manager  taskManager        // 下载管理器（Task 9 起接线；*engine.Manager 满足，测试注入 fake；不装配则 POST /api/tasks 拒绝）
 }
 
 // App 是 feiwu 的应用态容器（裁决 P1）：session/manager/store/settings/
@@ -34,8 +33,8 @@ type Deps struct {
 type App struct {
 	paths    store.Paths
 	settings store.Settings
-	secrets  secretStore     // 凭据加密存取（*store.SecretStore 满足；测试注入 fake）
-	manager  *engine.Manager // nil = Task 9 前占位
+	secrets  secretStore // 凭据加密存取（*store.SecretStore 满足；测试注入 fake）
+	manager  taskManager // nil = 未装配（POST /api/tasks 拒绝；Close 跳过）
 
 	// 登录流会话组（auth.go 维护）：jar 与 session/auth 同源，
 	// resetSession 原子重建三者；newAuthPair 是装配工厂（测试注入点）。
@@ -95,7 +94,13 @@ func (a *App) Close() {
 	a.stopKeepaliveLocked() // 停保活心跳（§2.6：ctx 取消即停）
 	a.authMu.Unlock()
 	a.hub.Close()
-	// TODO(Task 9): a.manager.Close()——E6 停机保留断点（manager 非 nil 时）。
+	if m := a.manager; m != nil {
+		// E6 停机保留断点。App.Close 会被 http.Server RegisterOnShutdown
+		// 的 go f() 与主关闭链并发调用——不包 once 的依据：engine.
+		// Manager.Close 自身幂等且并发安全（closed 检查与设置同处 m.mu
+		// 临界区，manager.go:699-710；重复/并发调用直接返回）。
+		m.Close()
+	}
 	// TODO(Task 11): store 落盘（tasks.json 任务上下文快照）。
 }
 
@@ -120,6 +125,9 @@ func (a *App) buildRouter() *gin.Engine {
 	api.POST("/login/cookie", a.handleCookieImport)
 	api.POST("/logout", a.handleLogout)
 	api.GET("/account", a.handleAccount)
+
+	// 任务创建（Task 9，tasks.go：目录展开/预算分配/自愈回调）。
+	api.POST("/tasks", a.handleCreateTasks)
 
 	registerStatic(r)
 	r.NoRoute(func(c *gin.Context) {

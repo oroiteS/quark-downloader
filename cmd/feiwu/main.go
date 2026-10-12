@@ -20,12 +20,13 @@ import (
 	"syscall"
 	"time"
 
+	"quark-downloader/internal/engine"
 	"quark-downloader/internal/store"
 	"quark-downloader/internal/webapi"
 )
 
-// shutdownTimeout 优雅关闭预算：HTTP 排空；Manager.Close（E6 保留断点）
-// 与 store 落盘共享同一预算（TODO Task 9/11 接线）。
+// shutdownTimeout 优雅关闭预算：HTTP 排空；Manager.Close（E6 保留断点，
+// Task 9 已接线）与 store 落盘（TODO Task 11）共享同一预算。
 const shutdownTimeout = 5 * time.Second
 
 // runConfig run 的可注入点（测试用）；零值即生产路径。
@@ -62,13 +63,22 @@ func run(ctx context.Context, opts ...runOption) error {
 	settings := store.LoadSettings(paths) // 缺失/坏文件 → 默认，不挡启动
 	secrets := store.NewSecretStore(paths)
 	slog.Info("数据目录就绪", "dir", paths.DataDir)
-	// TODO(Task 9): 会话/Manager 装配（engine.NewManager + onEvent 接线
-	// 到 hub.Broadcast），经 webapi.Deps.Manager 注入。
+	// Manager 装配（Task 9）：DestDir/Threads/MaxConcurrentTasks 与
+	// settings 同源——webapi 的 TaskCtx.Dest 组装与预算分配
+	// （AllocateBudget 的 cap/concurrency）因此与引擎内部一致。
+	// onEvent 传 nil 是引擎文档化容忍（Task 12 接 hub.Broadcast）。
+	mgr := engine.NewManager(engine.Config{
+		Threads:            settings.Threads,
+		Mode:               engine.ModeA, // settings 无 mode 字段，缺省直写
+		MaxConcurrentTasks: settings.MaxConcurrentTasks,
+		DestDir:            settings.DestDir,
+	}, nil)
 
 	app := webapi.New(webapi.Deps{
 		Paths:    paths,
 		Settings: settings,
 		Secrets:  secrets,
+		Manager:  mgr,
 	})
 	handler := app.Router()
 
@@ -119,8 +129,8 @@ func run(ctx context.Context, opts ...runOption) error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		srv.Close() // 排空超时：强关兜底
 	}
-	// App 生命周期收口（hub 已由 OnShutdown 关闭；此处幂等再收）。
-	// TODO(Task 9): Manager.Close（E6 保留断点）经 App.Close 扩展。
+	// App 生命周期收口（hub 已由 OnShutdown 关闭；此处幂等再收——
+	// manager.Close 的 E6 保留断点语义在并发/重复调用下幂等安全）。
 	// TODO(Task 11): store 落盘（tasks.json）经 App.Close 扩展。
 	app.Close()
 	if err := <-serveDone; err != nil && !errors.Is(err, http.ErrServerClosed) {
