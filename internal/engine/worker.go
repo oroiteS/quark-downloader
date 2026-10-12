@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	rand "math/rand/v2"
 	"net/http"
 	"os"
@@ -105,6 +106,12 @@ func (t *Task) runA(ctx context.Context) error {
 	//    文件长度复判由 Task 12 在 verdict 内扩展。
 	if err != nil {
 		if v := t.verdict(); v.Success {
+			// F1（审查）：Note 出口——翻转分支必须落一行 slog 注记，否则
+			// 生产中「有传输错误但数据完整」与正常成功不可区分。stdlib
+			// 默认 logger，零新增依赖；测试经 slog.SetDefault 注入捕获
+			// handler 断言产出（TestRunAVerdictFlipLogsNote）。
+			slog.Warn("feiwu: 完整性终判翻转（有传输错误但数据完整，按成功处理）",
+				"task", t.ID, "dest", t.Dest, "note", v.Note)
 			err = nil // 数据完整：翻转终态为 done，跳过清理删除
 		} else {
 			// §3.10 收尾：错误分类 → 半成品生死（删/留/转单线程/4xx 兜底）。

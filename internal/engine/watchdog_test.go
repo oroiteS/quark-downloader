@@ -5,10 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -233,6 +236,82 @@ func TestRunAFailAfterCompleteKeepsFile(t *testing.T) {
 	got, rerr := os.ReadFile(dest)
 	if rerr != nil || !bytes.Equal(got, data) {
 		t.Errorf("完整文件应保留且内容一致 (%v)", rerr)
+	}
+}
+
+// ---- F1（审查）：注记出口 ------------------------------------------------------
+
+// captureRecords 捕获 slog 记录的极简 handler（stdlib Handler 接口四方法）。
+type captureRecords struct {
+	mu   sync.Mutex
+	recs []slog.Record
+}
+
+func (h *captureRecords) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *captureRecords) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.recs = append(h.recs, r.Clone())
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureRecords) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureRecords) WithGroup(string) slog.Handler      { return h }
+
+func (h *captureRecords) snapshot() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.recs)
+}
+
+// 翻转分支的注记必须落日志（F1）：Verdict.Note 若只生成即丢，生产中
+// 「有传输错误但数据完整」与正常成功不可区分。
+//
+// 测试方式选 **slog.SetDefault 注入捕获 handler** 而非对 Note 生成路径
+// 断言：① 后者（TestVerdictMatrix 的 v.Note != ""）只证明字符串存在，
+// 不证明它被产出——恰是 F1 指出的缺口；② 不给 Task 新增注入字段，符合
+// 「F1 只动注记出口」的修复口径；③ 生产出口正是默认 logger，SetDefault
+// 断言的是真实出口本身。包内测试无 t.Parallel（串行），defer 还原后无
+// 全局状态泄漏。
+func TestRunAVerdictFlipLogsNote(t *testing.T) {
+	total := int64(2 << 20) // 4 片
+	data := testPattern(total)
+	srv, _ := newRangeServer(t, data)
+	dest := filepath.Join(t.TempDir(), "file.bin")
+
+	h := &captureRecords{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	tk := newFastTask(t, dest, srv.URL, 1, total)
+	go func() {
+		for tk.done.Load() < total {
+		}
+		tk.fail(&TaskError{Kind: KindRetryExhausted, Detail: "残留错误：该片后来被补齐"})
+	}()
+
+	if err := tk.runA(context.Background()); err != nil {
+		t.Fatalf("errors 非空但数据完整应按成功处理, got %v", err)
+	}
+	recs := h.snapshot()
+	if len(recs) != 1 {
+		t.Fatalf("翻转分支应恰落一行注记, got %d 条", len(recs))
+	}
+	attrs := map[string]string{}
+	recs[0].Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	if attrs["task"] != tk.ID {
+		t.Errorf("task = %q, want %q（TaskID）", attrs["task"], tk.ID)
+	}
+	if attrs["dest"] != dest {
+		t.Errorf("dest = %q, want %q（文件名）", attrs["dest"], dest)
+	}
+	if !strings.Contains(attrs["note"], "数据完整") {
+		t.Errorf("note = %q, 应含 Note 内容（有传输错误但数据完整）", attrs["note"])
 	}
 }
 

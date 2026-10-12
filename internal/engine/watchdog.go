@@ -127,7 +127,7 @@ func (w *Watchdog) Merging() bool {
 type Verdict struct {
 	Success     bool   // true = 数据完整，按成功处理（终态翻转 done、跳过清理删除）
 	Done, Total int64  // 判据时刻的累计已写 / 总字节（日志与断言用）
-	Note        string // 成功注记：有传输错误/取消但数据完整（上层落日志）
+	Note        string // 成功注记：有传输错误/取消但数据完整（出口：runA 翻转分支落 slog，F1）
 }
 
 // verdict 完整性终判（§3.11 逐字：报「失败」之前，先验证数据本身）。
