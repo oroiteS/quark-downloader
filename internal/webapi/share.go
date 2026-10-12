@@ -28,7 +28,8 @@ type shareSession struct {
 	pwdID      string
 	passcode   string
 	stoken     string
-	tokenCache map[string]string // fid → share_fid_token（parse/files 列表逐次并入）
+	tokenCache map[string]string             // fid → share_fid_token（parse/files 列表逐次并入）
+	entryCache map[string]protocol.FileEntry // fid → 文件条目（name/size/token；POST sid 引用时文件 fid 直建，未命中才走目录展开）
 }
 
 // shareSessions 包级会话表（单实例应用前提，与 tasksFileMu 同型先例；
@@ -55,6 +56,9 @@ func (s *shareSession) cacheTokens(entries []protocol.FileEntry) {
 	for _, e := range entries {
 		if e.ShareFIDToken != "" {
 			s.tokenCache[e.FID] = e.ShareFIDToken
+		}
+		if !e.Dir && e.FID != "" {
+			s.entryCache[e.FID] = e
 		}
 	}
 }
@@ -127,6 +131,7 @@ func (a *App) handleShareParse(c *gin.Context) {
 		passcode:   ref.Passcode,
 		stoken:     stoken,
 		tokenCache: map[string]string{},
+		entryCache: map[string]protocol.FileEntry{},
 	}
 	s.cacheTokens(files)
 	sid := newShareSID()

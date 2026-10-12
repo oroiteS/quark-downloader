@@ -1433,3 +1433,62 @@ func TestCreateTasksPublicShareNoPasscode(t *testing.T) {
 		t.Fatalf("download stoken = %+v, 期望现换值 st-fresh", dls)
 	}
 }
+
+// ---- fix round 3：单文件 fid 经 sid 缓存直建（真机第三轮暴露 blocker）----
+
+// TestCreateTasksFileFIDViaSID fid 命中 parse 会话条目缓存（parse 时已在
+// 列表中出现过）→ 直接按文件建任务；未命中才走目录展开语义。
+func TestCreateTasksFileFIDViaSID(t *testing.T) {
+	up := &fakeUpstream{
+		// 注意 share map 无 "f3" 键：f3 若被当目录查将得空列表——
+		// 断言走的是缓存直建路径而非目录展开。
+		share: map[string][]protocol.FileEntry{},
+		links: map[string]string{"f3": "https://d.quark.cn/f3?k=3"},
+	}
+	fm := &fakeManager{}
+	paths := taskTestPaths(t)
+	app := newTasksTestApp(t, up, fm, taskTestSettings(filepath.Join(paths.DataDir, "dl")), paths)
+
+	shareSessionsMu.Lock()
+	shareSessions["sid-f3"] = &shareSession{
+		pwdID: "pw-f", passcode: "", stoken: "st-f",
+		tokenCache: map[string]string{"f3": "tk3"},
+		entryCache: map[string]protocol.FileEntry{
+			"f3": {FID: "f3", FileName: "c.bin", Size: 128, ShareFIDToken: "tk3"},
+		},
+	}
+	shareSessionsMu.Unlock()
+	t.Cleanup(func() {
+		shareSessionsMu.Lock()
+		delete(shareSessions, "sid-f3")
+		shareSessionsMu.Unlock()
+	})
+
+	w := doReq(t, app.Router(), http.MethodPost, "/api/tasks", map[string]any{
+		"source": "share", "fids": []string{"f3"}, "sid": "sid-f3",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d, 期望 200（body=%s）", w.Code, w.Body)
+	}
+	var body struct {
+		TaskIDs []string `json:"task_ids"`
+		Skipped []any    `json:"skipped"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if len(body.TaskIDs) != 1 || len(body.Skipped) != 0 {
+		t.Fatalf("task_ids=%v skipped=%v, 期望 1 任务 0 跳过（body=%s）", body.TaskIDs, body.Skipped, w.Body)
+	}
+	subs := fm.snapshot()
+	if len(subs) != 1 || subs[0].LR.FID != "f3" || subs[0].LR.Size != 128 {
+		t.Fatalf("Submit = %+v, 期望 fid=f3 size=128（缓存条目直建）", subs)
+	}
+	if subs[0].LR.FileName != "c.bin" {
+		t.Fatalf("Submit FileName = %q, 期望 c.bin", subs[0].LR.FileName)
+	}
+	dls := up.downloadRequests()
+	if len(dls) == 0 || len(dls[0].FIDsToken) != 1 || dls[0].FIDsToken[0] != "tk3" {
+		t.Fatalf("download fids_token = %+v, 期望 [tk3]（缓存 token）", dls)
+	}
+}

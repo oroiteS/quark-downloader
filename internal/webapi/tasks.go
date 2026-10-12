@@ -125,13 +125,17 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, codeInvalidTasksRequest, err.Error())
 		return
 	}
+	// entryLookup：sid 会话的条目缓存查询（文件 fid 直建用；nil=无 sid
+	// 走纯目录展开，与 T9 契约一致）。
+	var entryLookup func(string) (protocol.FileEntry, bool)
 	if req.Source == "share" {
 		// sid 引用 parse 会话（T13 契约补全）：直传字段优先，sid 只补
 		// 缺省；sid 提供但未命中→404（与 /api/links 同语义，提示重新
 		// parse）——不静默降级直传半残路径。
+		var ss *shareSession
 		if req.SID != "" {
 			shareSessionsMu.Lock()
-			ss := shareSessions[req.SID]
+			ss = shareSessions[req.SID]
 			shareSessionsMu.Unlock()
 			if ss == nil {
 				writeError(c, http.StatusNotFound, codeNoShareSession,
@@ -147,6 +151,12 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 			}
 			if req.Stoken == "" {
 				req.Stoken = st
+			}
+			entryLookup = func(fid string) (protocol.FileEntry, bool) {
+				shareSessionsMu.Lock()
+				defer shareSessionsMu.Unlock()
+				e, ok := ss.entryCache[fid]
+				return e, ok
 			}
 		}
 		if req.PwdID == "" {
@@ -185,7 +195,7 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 	}
 
 	// ① 目录递归展开（G11：后端负责，分页拉全在协议层）。
-	items, err := expandFIDs(ctx, sess, req.Source, req.PwdID, stoken, req.FIDs)
+	items, err := expandFIDs(ctx, sess, req.Source, req.PwdID, stoken, req.FIDs, entryLookup)
 	if err != nil {
 		writeError(c, http.StatusBadGateway, codeExpandFailed, "展开目录失败: "+err.Error())
 		return
@@ -367,11 +377,22 @@ func (a *App) makeRefresher(t store.TaskCtx) func(ctx context.Context) (string, 
 
 // expandFIDs 逐个 fid 递归展开目录树，收集文件项（relDir 保留子树内
 // 相对结构，G11）。visited 防环兼防 fids 重复（同一目录不二次展开）；
-// 上游树结构异常成环时按已访问剪枝，不无限递归。
-func expandFIDs(ctx context.Context, sess *protocol.Session, source, pwdID, stoken string, fids []string) ([]fileItem, error) {
+// 上游树结构异常成环时按已访问剪枝，不无限递归。entryLookup 非空时
+// （sid 会话缓存），顶层 fid 命中缓存直接按文件项收集——单文件分享
+// 的文件 fid 无目录可展开（真机暴露）；未命中才走目录语义。
+func expandFIDs(ctx context.Context, sess *protocol.Session, source, pwdID, stoken string, fids []string, entryLookup func(string) (protocol.FileEntry, bool)) ([]fileItem, error) {
 	var items []fileItem
 	visited := make(map[string]bool, len(fids))
 	for _, fid := range fids {
+		if entryLookup != nil {
+			if e, ok := entryLookup(fid); ok {
+				items = append(items, fileItem{
+					fid: e.FID, name: e.FileName, size: e.Size,
+					token: e.ShareFIDToken, relDir: "",
+				})
+				continue
+			}
+		}
 		var err error
 		if source == "share" {
 			err = expandShare(ctx, sess, pwdID, stoken, fid, "", visited, &items)
