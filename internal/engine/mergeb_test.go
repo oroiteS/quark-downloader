@@ -54,7 +54,7 @@ func newFastTaskB(t *testing.T, dest, url string, threads int, total int64) *Tas
 // ---- 小文件全流程 -----------------------------------------------------------
 
 // TestRunBSmall：8MB/8 线程模式 B 完成后逐字节一致、分片目录清空（空目录
-// 也删）、.qmeta W 全满、进度事件 Done 单调；下载过程中目标文件始终未达
+// 也删）、成功终态删除 .qmeta、进度事件 Done 单调；下载过程中目标文件始终未达
 // total（绝不预分配的证据——预分配 = 开局满尺寸空洞文件）；收尾合并阶段
 // 出现 Merging=true 且 Done==total 的帧（watchdog EnterMerge + 合并吞吐）。
 func TestRunBSmall(t *testing.T) {
@@ -93,14 +93,10 @@ func TestRunBSmall(t *testing.T) {
 		t.Errorf("分片目录应清空删除, stat err=%v", err)
 	}
 
-	m, err := LoadQMeta(dest + ".qmeta")
-	if err != nil {
-		t.Fatalf("完成后 .qmeta 应存在且合法: %v", err)
-	}
-	for i, s := range tk.Segs {
-		if want := s.End - s.Start + 1; m.W[i] != want {
-			t.Errorf("W[%d] = %d, want %d（完成后应全满）", i, m.W[i], want)
-		}
+	// 成功终态删除 .qmeta（与 runA 同构：成功即删，目录只留完整交付文件；
+	// 失败/取消才保留断点，见 TestRunBResume / TestRunBCancelCleanup）。
+	if _, qerr := os.Stat(dest + ".qmeta"); !os.IsNotExist(qerr) {
+		t.Errorf("成功后 .qmeta 应删除, stat err = %v", qerr)
 	}
 
 	if p := tk.progress(); p.Done != total || p.State != "done" {
@@ -336,6 +332,11 @@ func TestRunBResumeAllOnDiskNoMarks(t *testing.T) {
 	}
 	if _, err := os.Stat(parts); !os.IsNotExist(err) {
 		t.Errorf("分片目录应清空删除, stat err=%v", err)
+	}
+	// 成功终态同构删除 .qmeta（成功即删；布置时写入的断点凭证随成功清理，
+	// 失败/取消才保留，见 TestRunBResume）。
+	if _, qerr := os.Stat(dest + ".qmeta"); !os.IsNotExist(qerr) {
+		t.Errorf("成功后 .qmeta 应删除, stat err = %v", qerr)
 	}
 }
 

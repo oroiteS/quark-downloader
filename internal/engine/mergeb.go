@@ -108,7 +108,9 @@ func (t *Task) runB(ctx context.Context) error {
 	cancel()
 	monWG.Wait()
 
-	// 终态落盘一次 .qmeta：W 全满 = 完成凭证；失败/取消 = 断点（best-effort）。
+	// 终态落盘一次 .qmeta：失败/取消 = 断点（成功终态由下方成功分支随即
+	// 删除，见 removeDoneQMeta）。best-effort——元数据丢失只是丢续传不丢
+	// 数据，不覆盖 firstErr。
 	_ = t.saveMeta()
 
 	t.errMu.Lock()
@@ -138,6 +140,11 @@ func (t *Task) runB(ctx context.Context) error {
 		// 全部片已合并删除：连空分片目录一并清掉（best-effort；残留无害——
 		// 下次对账 ④ 会扫，但「分片目录清空」是成功交付的验收面）。
 		_ = os.Remove(t.partsDir)
+		// 成功终态同构删除 .qmeta（与 runA 成功分支同一 removeDoneQMeta：
+		// 成功即删，目录只留完整交付文件；失败/取消保留断点供续传）。
+		// best-effort：删除失败仅日志，不掩盖成功（残留只是已完成任务的
+		// 冗余记录，交引擎对账仍秒完成，无害）。
+		t.removeDoneQMeta()
 		t.state.Store(int32(stateDone))
 	case isCancellation(err):
 		t.state.Store(int32(stateCanceled))

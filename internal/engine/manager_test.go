@@ -239,14 +239,10 @@ func TestManagerModeB(t *testing.T) {
 	waitForState(t, m, id, "done", 30*time.Second)
 	mustEqualFile(t, dest, data)
 
-	qm, err := LoadQMeta(dest + ".qmeta")
-	if err != nil {
-		t.Fatalf("完成后 .qmeta 应存在且合法: %v", err)
-	}
-	for i, w := range qm.W {
-		if w == 0 {
-			t.Errorf("完成后 W[%d]=0（应全满）", i)
-		}
+	// 成功终态删除 .qmeta（与 runA 同构：成功即删；恢复链 G11 判据凭
+	// 「Dest 完整且无 .qmeta」直接标已存在，无需重跑对账）。
+	if _, qerr := os.Stat(dest + ".qmeta"); !os.IsNotExist(qerr) {
+		t.Errorf("成功后 .qmeta 应删除, stat err = %v", qerr)
 	}
 	if _, err := os.Stat(dest + ".qparts"); !os.IsNotExist(err) {
 		t.Errorf("分片目录残留: %v", err)
