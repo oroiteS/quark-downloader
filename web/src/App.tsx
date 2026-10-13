@@ -13,8 +13,8 @@
  * 页面本体按 Task 接管：/login 已由 pages/Login（Task 5）挂载；/（解析）
  * 已由 pages/Parse（Task 6，控制者预授权接线）挂载；/tasks 已由
  * pages/Tasks（Task 7，控制者预授权接线）挂载；/drive 已由 pages/Drive
- * （Task 8，控制者预授权接线）挂载；其余路径仍为内联占位组件（简报
- * Files 清单不含对应页面文件）。SkipLink 落在 App.tsx（清单未含独立
+ * （Task 8，控制者预授权接线）挂载；/settings 已由 pages/Settings
+ * （Task 9，控制者预授权接线）挂载。SkipLink 落在 App.tsx（清单未含独立
  * 文件），main.tsx 与测试共同消费。
  */
 import { Navigate, Outlet, Route, Routes } from 'react-router-dom';
@@ -28,6 +28,7 @@ import { Login } from './pages/Login';
 import { Parse } from './pages/Parse';
 import { Tasks } from './pages/Tasks';
 import { Drive } from './pages/Drive';
+import { Settings } from './pages/Settings';
 import './app.css';
 
 /** 启动探测：GET /api/account 写 session store；失败视为未登录。 */
@@ -76,16 +77,6 @@ export function SkipLink() {
   );
 }
 
-/** 页面占位：页面本体由 Task 5+ 按路由逐个替换。 */
-function PagePlaceholder({ title }: { title: string }) {
-  return (
-    <section>
-      <h1>{title}</h1>
-      <p className="page-placeholder">页面待后续任务落地。</p>
-    </section>
-  );
-}
-
 /** D2 壳：左侧固定导航 + 主区；main 为 skip link 唯一落点（Outlet 出页面）。 */
 function AppShell() {
   return (
@@ -113,7 +104,7 @@ export function App() {
         <Route index element={<Parse />} />
         <Route path="tasks" element={<Tasks />} />
         <Route path="drive" element={<Drive />} />
-        <Route path="settings" element={<PagePlaceholder title="设置" />} />
+        <Route path="settings" element={<Settings />} />
       </Route>
       {/* 路由表外路径归位解析页（守卫仍生效，未登录先落登录） */}
       <Route path="*" element={<Navigate to="/" replace />} />

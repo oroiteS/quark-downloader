@@ -8,8 +8,9 @@
  * - formatSize：统一 GiB 两位小数（1024 基，单位不自适应——简报钉死）；
  *   非有限值/非正值兜底 "0.00 GiB"。
  *
- * 注意：与 FileList.formatSize（自适应 B→TB 版，Task 6）同名不同义；
- * FileList 不在本任务可碰清单内，二者语义差异已在报告疑虑中披露。
+ * 注意：FileList 曾有自己的 formatSize（自适应 B→TB 版，Task 6），与本模块
+ * 同名不同义（Task 7 报告疑虑披露过）；Task 8 起已统一改引本模块的
+ * formatSize（见 FileList.tsx 头注），同名不同义不复存在，全站唯一实现。
  */
 
 export function formatSpeed(bps: number): string {
