@@ -6,7 +6,10 @@
 .export-dialog {
   display: grid;
   gap: var(--space-4);
-  min-inline-size: min(40rem, 80vw);
+  /* T10 真机验收②：原强制下限 min(40rem, 80vw) 大于 Dialog 面板 30rem
+     上限——内容块被顶破面板（真机「文本框长于导出直链范围框」根因）。
+     改为收缩兜底，宽度交由面板内容盒决定。 */
+  min-inline-size: 0;
 }
 
 /* ---- 五格式 tab（ARIA tabs：role 由组件标注） ---- */
@@ -48,9 +51,13 @@
 .export-dialog__body {
   display: grid;
   gap: var(--space-3);
+  /* grid 子项默认 min-width:auto 会被长 URL 的 max-content 撑开，收缩兜底 */
+  min-inline-size: 0;
 }
 
 .export-dialog__text {
+  inline-size: 100%;
+  max-inline-size: 100%; /* 不越过容器（→ Dialog 面板）内容盒 */
   min-block-size: 12rem;
   padding: var(--space-3);
   background: var(--color-surface-variant);
@@ -60,6 +67,8 @@
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   line-height: var(--leading-normal);
+  /* 直链内容全为长 URL（无空白断点）：任意字符断行保证整链可见 */
+  word-break: break-all;
   resize: vertical;
 }
 

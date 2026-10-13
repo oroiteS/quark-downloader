@@ -93,6 +93,24 @@
   padding: var(--space-2);
 }
 
+/* 头像（T10 真机验收③）：32px 圆形；无值/加载失败时首字符占位圈 */
+.account-badge__avatar {
+  inline-size: 2rem;
+  block-size: 2rem;
+  border-radius: var(--radius-full);
+  flex: none;
+}
+
+.account-badge__avatar--fallback {
+  display: grid;
+  place-items: center;
+  background: var(--color-secondary);
+  color: var(--color-on-secondary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  user-select: none;
+}
+
 .capacity-ring {
   flex: none;
 }

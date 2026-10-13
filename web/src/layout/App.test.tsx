@@ -8,7 +8,7 @@
 // useSession store；api 以 vi.mock 模块级替换。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { App, SkipLink, probeAccount } from '../App';
 import { api } from '../api/client';
@@ -120,6 +120,14 @@ describe('App D2 布局', () => {
     // 容量文本：wire 字节按 1024 基准换算 GiB（G 即 GiB）
     expect(screen.getByText('31/50G')).toBeInTheDocument();
 
+    // avatar 无值 → 昵称首字符占位圈（T10：真机头像缺失修复）
+    const fallback = document.querySelector(
+      '.account-badge__avatar--fallback',
+    );
+    expect(fallback).not.toBeNull();
+    expect(fallback).toHaveTextContent('n');
+    expect(document.querySelector('img.account-badge__avatar')).toBeNull();
+
     // 容量环弧度 = used/total：offset 与 dasharray 同一周长推导
     const ring = document.querySelector(
       '.capacity-ring__value',
@@ -128,6 +136,43 @@ describe('App D2 布局', () => {
     const dasharray = Number(ring.getAttribute('stroke-dasharray'));
     const dashoffset = Number(ring.getAttribute('stroke-dashoffset'));
     expect((dasharray - dashoffset) / dasharray).toBeCloseTo(31 / 50);
+  });
+
+  it('avatar 有值：32px 圆形 img 渲染（alt="" 装饰，昵称承载语义）', async () => {
+    mockAccount({ ...LOGGED_IN_ACCOUNT, avatar: 'https://example.com/a.png' });
+    await probeAccount();
+    renderAppAt('/tasks');
+
+    const img = document.querySelector(
+      'img.account-badge__avatar',
+    ) as HTMLImageElement;
+    expect(img).not.toBeNull();
+    expect(img).toHaveAttribute('src', 'https://example.com/a.png');
+    expect(img).toHaveAttribute('alt', '');
+    expect(img).toHaveAttribute('width', '32');
+    expect(img).toHaveAttribute('height', '32');
+    expect(
+      document.querySelector('.account-badge__avatar--fallback'),
+    ).toBeNull();
+  });
+
+  it('img 加载失败：回退昵称首字符占位圈', async () => {
+    mockAccount({ ...LOGGED_IN_ACCOUNT, avatar: 'https://example.com/broken.png' });
+    await probeAccount();
+    renderAppAt('/tasks');
+
+    const img = document.querySelector(
+      'img.account-badge__avatar',
+    ) as HTMLImageElement;
+    expect(img).not.toBeNull();
+    fireEvent.error(img);
+
+    const fallback = document.querySelector(
+      '.account-badge__avatar--fallback',
+    );
+    expect(fallback).not.toBeNull();
+    expect(fallback).toHaveTextContent('n');
+    expect(document.querySelector('img.account-badge__avatar')).toBeNull();
   });
 
   it('会话过期置 false：自动跳 /login 且不循环（location 只变一次）', async () => {

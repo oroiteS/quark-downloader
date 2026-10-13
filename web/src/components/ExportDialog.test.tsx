@@ -6,6 +6,10 @@
 // - 复制按钮 → clipboard.writeText(当前文本) + toast 反馈；clipboard 不可用 → 失败 toast
 // - export 失败 → role=alert；加载中复制禁用；expiresHint 时效提示上屏
 // export 通道为纯文本（T3 账本：apiFetch 2xx 硬 res.json() 会崩）——stub 全局 fetch。
+// 样式断言直接读源 CSS 文本（jsdom 不做布局、断言不了计算样式）。运行时由
+// vitest（Node）解析；TS 侧项目刻意无 @types/node（离线不新增依赖），局部豁免。
+// @ts-expect-error 项目无 Node 类型定义（见上），运行时 vitest 提供实现
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -274,3 +278,26 @@ const TAB_LABEL: Record<(typeof FORMATS)[number], string> = {
 function stubbedFetch(): ReturnType<typeof vi.fn> {
   return vi.mocked(globalThis.fetch) as ReturnType<typeof vi.fn>;
 }
+
+/**
+ * 样式层防回归（T10 真机验收②：长 URL 撑破 Dialog 面板）。
+ * jsdom 不做 CSS 布局、断言不了计算样式，故对源 CSS 文本钉关键声明：
+ * 容器收缩兜底 + textarea 全宽约束 + 长词断行，防止回归到 40rem 强制下限。
+ */
+describe('ExportDialog 样式防回归（文本框溢出）', () => {
+  const cssText = readFileSync('src/components/export-dialog.css', 'utf8');
+
+  it('容器 min-inline-size:0 兜底，不再强制 40rem 下限', () => {
+    expect(cssText).toMatch(/\.export-dialog\s*\{[^}]*min-inline-size:\s*0/);
+    expect(cssText).not.toMatch(/min-inline-size:\s*min\(40rem/);
+  });
+
+  it('textarea 全宽约束 + 长词断行', () => {
+    expect(cssText).toMatch(
+      /\.export-dialog__text\s*\{[^}]*max-inline-size:\s*100%/,
+    );
+    expect(cssText).toMatch(
+      /\.export-dialog__text\s*\{[^}]*word-break:\s*break-all/,
+    );
+  });
+});

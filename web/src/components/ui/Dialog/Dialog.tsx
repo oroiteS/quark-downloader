@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef } from 'react';
-import type { KeyboardEvent, ReactNode } from 'react';
+import type { KeyboardEvent, MouseEvent, ReactNode } from 'react';
 import './dialog.css';
 
 /** 焦点陷阱遍历集（skill Modal 模式选择器；disabled 在取集后过滤）。 */
@@ -15,8 +15,16 @@ export interface DialogProps {
 
 /**
  * 模态对话框（skill Modal 模式）：
- * 打开→保存先前焦点、焦点入内；Tab 循环不出界；Esc 关闭；
+ * 打开→保存先前焦点、焦点入内；Tab 循环不出界；Esc/遮罩点击/关闭按钮关闭；
  * 关闭→焦点归还先前元素。遮罩用 --color-scrim（Task 1 备好）。
+ *
+ * T10 真机验收修复（三重关闭缺失）：
+ * - Esc 监听提至 document 级（原绑 overlay，焦点漂出后失效——T2 deferred
+ *   核销）；Escape 分支随之从 overlay onKeyDown 移除，防同一次按键双触发。
+ * - 右上角关闭按钮（aria-label="关闭"，44px 触达，DOM 序在 children 之后
+ *   =陷阱集末位，不改变「首焦点入首个业务控件」）。
+ * - 遮罩 mousedown（target 为 overlay 本身才关——在面板内按下拖选到遮罩
+ *   释放不误关）。
  */
 export function Dialog({ open, onClose, title, children }: DialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -41,14 +49,23 @@ export function Dialog({ open, onClose, title, children }: DialogProps) {
     };
   }, [open]);
 
+  // Esc document 级：无论焦点落在何处（含漂出 overlay）都能关闭
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [open, onClose]);
+
   if (!open) return null;
 
+  // Tab 陷阱（Esc 已上移 document，此处不再处理）
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      onClose();
-      return;
-    }
     if (event.key !== 'Tab') return;
 
     const dialog = dialogRef.current;
@@ -84,8 +101,19 @@ export function Dialog({ open, onClose, title, children }: DialogProps) {
     }
   };
 
+  // 遮罩点击关闭在 mousedown 判定：从面板内按下拖选到遮罩释放不误关
+  const handleOverlayMouseDown = (event: MouseEvent<HTMLDivElement>) => {
+    if (event.target === event.currentTarget) {
+      onClose();
+    }
+  };
+
   return (
-    <div className="dialog-overlay" onKeyDown={handleKeyDown}>
+    <div
+      className="dialog-overlay"
+      onKeyDown={handleKeyDown}
+      onMouseDown={handleOverlayMouseDown}
+    >
       <div
         ref={dialogRef}
         role="dialog"
@@ -98,6 +126,14 @@ export function Dialog({ open, onClose, title, children }: DialogProps) {
           {title}
         </h2>
         {children}
+        <button
+          type="button"
+          className="dialog__close"
+          aria-label="关闭"
+          onClick={onClose}
+        >
+          <span aria-hidden="true">×</span>
+        </button>
       </div>
     </div>
   );

@@ -14,6 +14,7 @@
 .dialog {
   /* 面板宽度上限属布局尺寸（非间距刻度），rem 相对根字号 */
   max-width: 30rem;
+  position: relative; /* 关闭按钮 absolute 定位上下文 */
   background: var(--color-surface);
   color: var(--color-on-surface);
   font-family: var(--font-sans);
@@ -32,4 +33,35 @@
   font-size: var(--text-xl);
   line-height: var(--leading-tight);
   color: var(--color-on-surface);
+}
+
+/* 右上角关闭按钮（T10 真机验收修复）：44px 触达 + tokens 配色 + focus 环 */
+.dialog__close {
+  position: absolute;
+  inset-block-start: var(--space-2);
+  inset-inline-end: var(--space-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 2.75rem;
+  min-block-size: 2.75rem; /* skill：触控/点击目标 ≥44px */
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--color-on-surface-muted);
+  font: inherit;
+  font-size: var(--text-xl);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dialog__close:hover {
+  color: var(--color-on-surface);
+  background: var(--color-surface-variant);
+}
+
+.dialog__close:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
 }
