@@ -15,7 +15,7 @@ import {
 } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { groupByBatch, Tasks } from './Tasks';
-import { ToastHost } from '../components/ui';
+import { ToastHost, toast } from '../components/ui';
 import { api } from '../api/client';
 import type { Task } from '../api/types';
 import { useTasks } from '../stores/tasks';
@@ -221,7 +221,7 @@ describe('九词面操作集与徽章（混合任务集经 store 注入）', () 
 });
 
 describe('进度显示', () => {
-  it('进度条 role=progressbar + aria-valuenow/max（done/size 字节值）', async () => {
+  it('进度条 role=progressbar + aria-valuenow/max + aria-valuetext（百分比·大小）', async () => {
     mockApi([]);
     await renderPage();
     act(() => {
@@ -231,6 +231,11 @@ describe('进度显示', () => {
     expect(bar).toHaveAttribute('aria-valuemin', '0');
     expect(bar).toHaveAttribute('aria-valuenow', String(GIB));
     expect(bar).toHaveAttribute('aria-valuemax', String(2 * GIB));
+    // M-2（fix round 1）：读屏友好文本，formatSize 组装（done=GIB、size=2GIB → 50%）
+    expect(bar).toHaveAttribute(
+      'aria-valuetext',
+      '50% · 1.00 GiB / 2.00 GiB',
+    );
   });
 
   it('merging=true：显示「合并中」且进度条填充置灰（修饰类）', async () => {
@@ -266,7 +271,7 @@ describe('进度显示', () => {
   });
 });
 
-describe('操作行为（POST 到对应 id；操作后 UI 以 store/SSE 为权威）', () => {
+describe('操作行为（POST 到对应 id；retry 成功后对账刷新——fix round 1 I-1 候选②）', () => {
   it('点暂停 → POST /api/tasks/:id/pause', async () => {
     mockApi([]);
     await renderPage();
@@ -289,6 +294,70 @@ describe('操作行为（POST 到对应 id；操作后 UI 以 store/SSE 为权�
     await waitFor(() =>
       expect(api.post).toHaveBeenCalledWith('/api/tasks/t-err/retry'),
     );
+  });
+
+  it('retry POST 失败 → 错误 toast，不发起对账 GET', async () => {
+    mockApi([]);
+    vi.mocked(api.post).mockRejectedValueOnce(new Error('boom'));
+    await renderPage();
+    act(() => {
+      useTasks.getState().replaceAll([makeTask({ id: 't-err', state: 'error' })]);
+    });
+    fireEvent.click(within(rowOf('t-err.zip')).getByRole('button', { name: '重试' }));
+    expect(await screen.findByText('操作失败，请重试')).toBeInTheDocument();
+    expect(api.get).toHaveBeenCalledTimes(1); // 仅挂载降级那次，对账未发起
+  });
+
+  it('retry 成功 → GET /api/tasks 对账一次（replaceAll：新 id 入列、旧僵死条目消除）', async () => {
+    let getCalls = 0;
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === '/api/tasks') {
+        getCalls += 1;
+        if (getCalls === 1) return [] as never; // 挂载降级
+        return [makeTask({ id: 't-new', state: 'running' })] as never; // 对账快照（不含 t-old）
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+    vi.mocked(api.post).mockResolvedValue({ task_id: 't-new' } as never);
+    await renderPage();
+    act(() => {
+      useTasks.getState().replaceAll([makeTask({ id: 't-old', state: 'error' })]);
+    });
+    fireEvent.click(within(rowOf('t-old.zip')).getByRole('button', { name: '重试' }));
+    // 对账快照（不含 t-old）落地：新 id 条目入列，旧僵死条目消除
+    expect(await screen.findByText('t-new.zip')).toBeInTheDocument();
+    expect(screen.queryByText('t-old.zip')).not.toBeInTheDocument();
+    expect(api.get).toHaveBeenCalledTimes(2);
+    expect(api.get).toHaveBeenNthCalledWith(2, '/api/tasks');
+  });
+
+  it('retry 成功但对账 GET 失败 → 静默（POST 已成功，不误弹「操作失败」）', async () => {
+    let getCalls = 0;
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === '/api/tasks') {
+        getCalls += 1;
+        if (getCalls === 1) return [] as never; // 挂载降级成功
+        throw new Error('reconcile boom'); // 对账失败
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+    vi.mocked(api.post).mockResolvedValue({ task_id: 't-new' } as never);
+    await renderPage();
+    act(() => {
+      useTasks.getState().replaceAll([makeTask({ id: 't-err', state: 'error' })]);
+    });
+    // toast 为模块级单例（4s 自动消退，前序用例可能残留）：以快照计数对比
+    // 断言「本用例未新增『操作失败』提示」，语义等价且不受残留干扰。
+    const errToastsBefore = toast
+      .getSnapshot()
+      .filter((t) => t.message === '操作失败，请重试').length;
+    fireEvent.click(within(rowOf('t-err.zip')).getByRole('button', { name: '重试' }));
+    await waitFor(() => expect(api.get).toHaveBeenCalledTimes(2));
+    await act(async () => {}); // 冲刷对账 reject 微任务链
+    const errToastsAfter = toast
+      .getSnapshot()
+      .filter((t) => t.message === '操作失败，请重试').length;
+    expect(errToastsAfter).toBe(errToastsBefore);
   });
 
   it('复制错误信息 → clipboard.writeText(错误文本)', async () => {
