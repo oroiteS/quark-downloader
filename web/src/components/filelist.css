@@ -1,0 +1,103 @@
+/**
+ * 通用文件列表样式（Task 6，组件伴随文件，控制者预豁免）：
+ * 全部走 tokens.css 变量，不硬编码色值/像素间距；
+ * 触控/点击目标 ≥44px（label 包裹 checkbox 扩大命中区）。
+ */
+
+.file-list__table {
+  inline-size: 100%;
+  border-collapse: collapse;
+}
+
+.file-list__table th,
+.file-list__table td {
+  padding: var(--space-1) var(--space-3);
+  border-block-end: 1px solid var(--color-border);
+  text-align: start;
+  vertical-align: middle;
+}
+
+.file-list__table thead th {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-on-surface-muted);
+}
+
+.file-list__col-check {
+  inline-size: 2.75rem; /* 44px：勾选列定宽，命中区即 label 尺寸 */
+}
+
+.file-list__col-size {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* label 扩大 checkbox 命中区至 ≥44px（skill 触控目标规范） */
+.file-list__check {
+  display: grid;
+  place-items: center;
+  margin: 0;
+  min-inline-size: 2.75rem;
+  min-block-size: 2.75rem;
+  cursor: pointer;
+}
+
+.file-list__check input {
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+}
+
+.file-list__check input:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.file-list__name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-block-size: 2.75rem;
+  word-break: break-all;
+}
+
+/* 目录名导航按钮：原生 button 语义，链接式视觉 */
+.file-list__dir {
+  min-block-size: 2.75rem;
+  padding: var(--space-1) var(--space-2);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-primary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.file-list__dir:hover {
+  text-decoration: underline;
+}
+
+.file-list__dir:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* 「含子目录」可见标注：目录勾选语义提示 */
+.file-list__tag {
+  flex: none;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--color-on-surface-muted);
+}
+
+.file-list__empty {
+  margin: 0;
+  padding: var(--space-4) var(--space-3);
+  color: var(--color-on-surface-muted);
+}

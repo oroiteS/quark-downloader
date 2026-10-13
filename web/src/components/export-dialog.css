@@ -1,0 +1,88 @@
+/**
+ * 导出直链对话框样式（Task 6，组件伴随文件，控制者预豁免）：
+ * 全部走 tokens.css 变量，不硬编码色值/像素间距；tab 触控目标 ≥44px。
+ */
+
+.export-dialog {
+  display: grid;
+  gap: var(--space-4);
+  min-inline-size: min(40rem, 80vw);
+}
+
+/* ---- 五格式 tab（ARIA tabs：role 由组件标注） ---- */
+.export-dialog__tabs {
+  display: flex;
+  gap: var(--space-1);
+  border-block-end: 1px solid var(--color-border);
+  overflow-x: auto;
+}
+
+.export-dialog__tab {
+  min-block-size: 2.75rem; /* skill：触控/点击目标 ≥44px */
+  padding: var(--space-2) var(--space-3);
+  background: none;
+  border: none;
+  border-block-end: 2px solid transparent;
+  color: var(--color-on-surface-muted);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.export-dialog__tab:hover {
+  color: var(--color-on-surface);
+}
+
+.export-dialog__tab[aria-selected='true'] {
+  color: var(--color-primary);
+  border-block-end-color: var(--color-primary);
+}
+
+.export-dialog__tab:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+/* ---- 导出文本面板 ---- */
+.export-dialog__body {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.export-dialog__text {
+  min-block-size: 12rem;
+  padding: var(--space-3);
+  background: var(--color-surface-variant);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-on-surface);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  resize: vertical;
+}
+
+.export-dialog__text:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-color: var(--color-primary);
+}
+
+.export-dialog__error {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-error);
+}
+
+/* 时效提示（expires_hint 语义）：警告色弱化呈现 */
+.export-dialog__hint {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-warning);
+}
+
+.export-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+}

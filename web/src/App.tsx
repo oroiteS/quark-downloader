@@ -10,8 +10,9 @@
  * 落在本文件而非 main.tsx 内联——main.tsx 带 createRoot 副作用不可被测试导入；
  * 401/网络错误一律 loggedIn=false（auth.go:342 未登录即 401 not_logged_in）。
  *
- * 页面本体按 Task 接管：/login 已由 pages/Login（Task 5）挂载；其余路径
- * 仍为内联占位组件（简报 Files 清单不含对应页面文件）。SkipLink 落在
+ * 页面本体按 Task 接管：/login 已由 pages/Login（Task 5）挂载；/（解析）
+ * 已由 pages/Parse（Task 6，控制者预授权接线）挂载；其余路径仍为内联
+ * 占位组件（简报 Files 清单不含对应页面文件）。SkipLink 落在
  * App.tsx（清单未含独立文件），main.tsx 与测试共同消费。
  */
 import { Navigate, Outlet, Route, Routes } from 'react-router-dom';
@@ -22,6 +23,7 @@ import { useSession } from './stores/session';
 import { Spinner } from './components/ui';
 import { Sidebar } from './layout/Sidebar';
 import { Login } from './pages/Login';
+import { Parse } from './pages/Parse';
 import './app.css';
 
 /** 启动探测：GET /api/account 写 session store；失败视为未登录。 */
@@ -104,7 +106,7 @@ export function App() {
           </RequireAuth>
         }
       >
-        <Route index element={<PagePlaceholder title="解析" />} />
+        <Route index element={<Parse />} />
         <Route path="tasks" element={<PagePlaceholder title="任务" />} />
         <Route path="drive" element={<PagePlaceholder title="网盘" />} />
         <Route path="settings" element={<PagePlaceholder title="设置" />} />
