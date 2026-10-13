@@ -14,7 +14,7 @@ pnpm test             # 全量测试（Vitest）
 pnpm build            # 先跑 typecheck（prebuild 链），产物直落 internal/webapi/web/dist
 ```
 
-后端为 Go 单二进制，前端产物经 `//go:embed`（internal/webapi/web/static.go）打进二进制：
+后端为 Go 单二进制，前端产物经 `//go:embed`（internal/webapi/static.go）打进二进制：
 
 ```bash
 go build -o feiwu ./cmd/feiwu
