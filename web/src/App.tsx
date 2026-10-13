@@ -11,7 +11,8 @@
  * 401/网络错误一律 loggedIn=false（auth.go:342 未登录即 401 not_logged_in）。
  *
  * 页面本体按 Task 接管：/login 已由 pages/Login（Task 5）挂载；/（解析）
- * 已由 pages/Parse（Task 6，控制者预授权接线）挂载；其余路径仍为内联
+ * 已由 pages/Parse（Task 6，控制者预授权接线）挂载；/tasks 已由
+ * pages/Tasks（Task 7，控制者预授权接线）挂载；其余路径仍为内联
  * 占位组件（简报 Files 清单不含对应页面文件）。SkipLink 落在
  * App.tsx（清单未含独立文件），main.tsx 与测试共同消费。
  */
@@ -24,6 +25,7 @@ import { Spinner } from './components/ui';
 import { Sidebar } from './layout/Sidebar';
 import { Login } from './pages/Login';
 import { Parse } from './pages/Parse';
+import { Tasks } from './pages/Tasks';
 import './app.css';
 
 /** 启动探测：GET /api/account 写 session store；失败视为未登录。 */
@@ -107,7 +109,7 @@ export function App() {
         }
       >
         <Route index element={<Parse />} />
-        <Route path="tasks" element={<PagePlaceholder title="任务" />} />
+        <Route path="tasks" element={<Tasks />} />
         <Route path="drive" element={<PagePlaceholder title="网盘" />} />
         <Route path="settings" element={<PagePlaceholder title="设置" />} />
       </Route>

@@ -103,17 +103,22 @@ export class ApiError extends Error {
 
 // ---- DTO ----
 
-/** 任务状态开放集合：已知 8 值之外，未知值原样保留（渲染层不崩溃）。 */
+/**
+ * 任务状态九词面（Ruling T3-F1 控制者钉死）：pending|running|paused|done|
+ * error|canceled|finished|needs_reparse|exists。终态失败=error、取消=canceled
+ * （T3 曾按 deact 旧词面写 failed/cancelled，Task 7 起以本词面为准）。
+ * 闭合集合（不再留 (string & {}) 兜底）：渲染层对未知值走默认分支兜底，不崩溃。
+ */
 export type TaskState =
   | 'pending'
   | 'running'
   | 'paused'
+  | 'done'
+  | 'error'
+  | 'canceled'
   | 'finished'
-  | 'failed'
-  | 'cancelled'
   | 'needs_reparse'
-  | 'exists'
-  | (string & {});
+  | 'exists';
 
 /** taskDTO（tasks.go:500-512 逐字；GET /api/tasks 响应与 SSE hello 载荷同形）。 */
 export interface Task {

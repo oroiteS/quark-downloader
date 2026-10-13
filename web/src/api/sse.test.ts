@@ -55,7 +55,7 @@ function makeMemoryTaskStore() {
   return { hooks, list: () => tasks };
 }
 
-function makeTask(id: string, state = 'running'): Task {
+function makeTask(id: string, state: Task['state'] = 'running'): Task {
   return {
     id,
     file_name: `${id}.zip`,
@@ -133,10 +133,10 @@ describe('connectEvents（EventSource 单例与帧分发）', () => {
     es.emit({
       type: 'task_final',
       taskId: 't1',
-      payload: { state: 'failed', error: '磁盘已满' },
+      payload: { state: 'error', error: '磁盘已满' },
     });
     const t1 = store.list().find((t) => t.id === 't1');
-    expect(t1?.state).toBe('failed');
+    expect(t1?.state).toBe('error');
     expect(t1?.error).toBe('磁盘已满');
   });
 

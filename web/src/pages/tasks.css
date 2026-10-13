@@ -1,0 +1,39 @@
+/**
+ * 任务页样式（Task 7）：全 tokens 变量（frontend-designer SKILL 规范）。
+ */
+
+.tasks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.tasks h1 {
+  font-size: var(--text-2xl);
+}
+
+.tasks__empty {
+  color: var(--color-on-surface-muted);
+}
+
+.tasks__batch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* 组头「批次 HH:MM · N 项」：弱化为分组层级标识 */
+.tasks__batch-head {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-on-surface-muted);
+}
+
+.tasks__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
