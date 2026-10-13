@@ -9,6 +9,7 @@
  * probeAccount：启动探测（main.tsx 编排：先探测后 connectEvents）。探测实现
  * 落在本文件而非 main.tsx 内联——main.tsx 带 createRoot 副作用不可被测试导入；
  * 401/网络错误一律 loggedIn=false（auth.go:342 未登录即 401 not_logged_in）。
+ * 空昵称半登录态（真机复验三轮）同样按未登录处理，见 probeAccount 内注释。
  *
  * 页面本体按 Task 接管：/login 已由 pages/Login（Task 5）挂载；/（解析）
  * 已由 pages/Parse（Task 6，控制者预授权接线）挂载；/tasks 已由
@@ -35,7 +36,13 @@ import './app.css';
 export async function probeAccount(): Promise<void> {
   try {
     const account = await api.get<Account>('/api/account');
-    if (account.logged_in) {
+    // 空昵称半登录态防御（真机复验三轮，控制者裁决）：后端 auth.go:344-382
+    // 存在边缘路径——QuickCheck wall 失败但 probeFileSort 兜底成功且进程内
+    // cachedAccount 为空 → 返回 200 {logged_in:true, nickname:"", avatar:"",
+    // capacity:{真值}}。该态对用户就是未登录体验（昵称空 → AccountBadge
+    // 显示「未登录」却放行内页），与 401 同路置 loggedIn=false，不写昵称/
+    // 容量，强制重扫码。
+    if (account.logged_in && account.nickname !== '') {
       useSession.getState().setAccount({
         nickname: account.nickname,
         avatar: account.avatar,

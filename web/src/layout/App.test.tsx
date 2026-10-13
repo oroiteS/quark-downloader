@@ -1,5 +1,7 @@
 // App 壳/路由/登录守卫行为钉死（简报 Step 1）：
 // - 三态守卫：null=全屏 Spinner 不跳转 / false=重定向 /login / true=放行
+// - 空昵称半登录态（真机复验三轮）：200 {logged_in:true, nickname:""} 按未
+//   登录处理，昵称/容量不写入（auth.go 边缘路径，见 probeAccount 注释）
 // - D2 导航四项 + 当前项 aria-current="page"（NavLink 内建语义）
 // - AccountBadge 容量换算（wire 为字节 → 1024 基准 GiB 显示）与容量环弧度=used/total
 // - 会话过期（logoutReset 置 false）→ 自动跳 /login 且不循环（location 只变一次）
@@ -94,6 +96,23 @@ describe('App 登录守卫（三态）', () => {
     vi.mocked(api.get).mockRejectedValue(new Error('HTTP 500'));
     await probeAccount();
     expect(useSession.getState().loggedIn).toBe(false);
+  });
+
+  // 空昵称半登录态（真机复验三轮，控制者裁决）：后端 auth.go:344-382 边缘
+  // 路径——QuickCheck wall 失败但 probeFileSort 兜底成功 → 200
+  // {logged_in:true, nickname:"", capacity:{真值}}。按未登录处理：不写昵称/
+  // 容量（容量真值也不得写入，否则守卫放行 + AccountBadge「未登录」并存）。
+  it('探测 200 但昵称为空（半登录态边缘路径）：loggedIn=false 且昵称/容量不写入', async () => {
+    mockAccount({
+      logged_in: true,
+      nickname: '',
+      avatar: '',
+      capacity: { total: 24 * GIB, used: 20 * GIB }, // 真机截图：容量 24/20G 真值
+    });
+    await probeAccount();
+    expect(useSession.getState().loggedIn).toBe(false);
+    expect(useSession.getState().nickname).toBe('');
+    expect(useSession.getState().capacity).toBeNull();
   });
 });
 
