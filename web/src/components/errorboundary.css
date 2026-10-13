@@ -1,0 +1,25 @@
+/* ErrorBoundary 错误卡（T16）：色/间距/圆角/字体全走 tokens.css，
+   双主题（data-theme）自动跟随；重载按钮复用 ui/Button（.btn tokens）。 */
+.error-boundary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  margin: var(--space-10) auto;
+  max-inline-size: 32rem;
+  padding: var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  color: var(--color-on-surface);
+  text-align: center;
+}
+
+.error-boundary__title {
+  font-size: var(--text-xl);
+  color: var(--color-error);
+}
+
+.error-boundary__desc {
+  color: var(--color-on-surface-muted);
+}

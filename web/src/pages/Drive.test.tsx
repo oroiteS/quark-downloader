@@ -117,6 +117,21 @@ describe('网盘页：根列表渲染（场景 1）', () => {
       '拉取网盘目录失败: upstream boom',
     );
   });
+
+  it('T16 防御：drive/files 响应 files:null → 渲染空目录文案不崩（files.map 不遇 null）', async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/drive/files')) {
+        return { files: null } as never;
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+    render(<Drive />);
+
+    expect(
+      await screen.findByRole('table', { name: '网盘文件列表' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('此目录为空')).toBeInTheDocument();
+  });
 });
 
 describe('网盘页：目录导航与面包屑（场景 2）', () => {

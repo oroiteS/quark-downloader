@@ -85,7 +85,9 @@ export function Parse() {
         return;
       }
       setResult(r);
-      setFiles(r.files);
+      // files ?? [] 兜底（T16 第二层纵深）：后端异常形态 files:null 时
+      // 不进 FileList 炸 files.map，渲染空列表提示。
+      setFiles(r.files ?? []);
       setStack([]);
       setChecked(new Set());
       setFilesError(null);
@@ -107,7 +109,7 @@ export function Parse() {
     try {
       const r = await listShareFiles(result.sid, entry.fid);
       if (genRef.current !== gen) return;
-      setFiles(r.files);
+      setFiles(r.files ?? []); // T16 兜底：null 不炸 files.map
       setStack((s) => [...s, { fid: entry.fid, name: entry.file_name }]);
     } catch (err) {
       if (genRef.current !== gen) return;
@@ -130,7 +132,7 @@ export function Parse() {
     try {
       const r = await listShareFiles(result.sid, fid);
       if (genRef.current !== gen) return;
-      setFiles(r.files);
+      setFiles(r.files ?? []); // T16 兜底：null 不炸 files.map
       setStack((s) => s.slice(0, idx + 1));
     } catch (err) {
       if (genRef.current !== gen) return;

@@ -25,6 +25,7 @@ import { api } from './api/client';
 import type { Account } from './api/types';
 import { useSession } from './stores/session';
 import { Spinner } from './components/ui';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Sidebar } from './layout/Sidebar';
 import { Login } from './pages/Login';
 import { Parse } from './pages/Parse';
@@ -98,25 +99,29 @@ function AppShell() {
   );
 }
 
-/** 路由表（简报钉死五路径）：/login 独立于守卫外，其余经 layout route 全受守卫。 */
+/** 路由表（简报钉死五路径）：/login 独立于守卫外，其余经 layout route 全受守卫。
+ * Routes 外层挂 ErrorBoundary（T16 第三层）：任一页面渲染期错误（未防御
+ * 的 null 形状等）由顶层边界接住出错误卡，不整树卸载白屏。 */
 export function App() {
   return (
-    <Routes>
-      <Route path="/login" element={<Login />} />
-      <Route
-        element={
-          <RequireAuth>
-            <AppShell />
-          </RequireAuth>
-        }
-      >
-        <Route index element={<Parse />} />
-        <Route path="tasks" element={<Tasks />} />
-        <Route path="drive" element={<Drive />} />
-        <Route path="settings" element={<Settings />} />
-      </Route>
-      {/* 路由表外路径归位解析页（守卫仍生效，未登录先落登录） */}
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <ErrorBoundary>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route
+          element={
+            <RequireAuth>
+              <AppShell />
+            </RequireAuth>
+          }
+        >
+          <Route index element={<Parse />} />
+          <Route path="tasks" element={<Tasks />} />
+          <Route path="drive" element={<Drive />} />
+          <Route path="settings" element={<Settings />} />
+        </Route>
+        {/* 路由表外路径归位解析页（守卫仍生效，未登录先落登录） */}
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </ErrorBoundary>
   );
 }

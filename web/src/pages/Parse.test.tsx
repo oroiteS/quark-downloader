@@ -245,6 +245,25 @@ describe('解析页：目录导航（G10）', () => {
 
     expect(screen.getByText('此目录为空')).toBeInTheDocument();
   });
+
+  it('T16 防御：parse 响应 files:null → 渲染空目录文案不崩（files.map 不遇 null）', async () => {
+    parseResponse = { ...PARSE_OK, files: null };
+    renderParse();
+    await parseShareText();
+
+    expect(screen.getByRole('table', { name: '文件列表' })).toBeInTheDocument();
+    expect(screen.getByText('此目录为空')).toBeInTheDocument();
+  });
+
+  it('T16 防御：share/files 响应 files:null（进入子目录）→ 空目录文案不崩', async () => {
+    renderParse();
+    await parseShareText();
+    vi.mocked(api.get).mockImplementation(async () => ({ files: null }) as never);
+    fireEvent.click(screen.getByRole('button', { name: '剧集' }));
+    await flush();
+
+    expect(screen.getByText('此目录为空')).toBeInTheDocument();
+  });
 });
 
 describe('解析页：FileList 勾选（通用列表契约）', () => {

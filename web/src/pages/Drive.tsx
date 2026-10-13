@@ -77,7 +77,9 @@ export function Drive() {
         `/api/drive/files?pdir_fid=${encodeURIComponent(fid)}`,
       );
       if (genRef.current !== gen) return;
-      setFiles(r.files);
+      // files ?? [] 兜底（T16 第二层纵深）：后端异常形态 files:null 时
+      // 不进 FileList 炸 files.map，渲染空列表提示。
+      setFiles(r.files ?? []);
       setStack(nextStack);
     } catch (err) {
       if (genRef.current !== gen) return;
