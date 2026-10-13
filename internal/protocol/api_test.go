@@ -5,6 +5,7 @@ package protocol
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -258,6 +259,71 @@ func TestDriveListRootDefault(t *testing.T) {
 	if gotPdir != "0" {
 		t.Errorf("pdir_fid = %q, want 0(空串归一化为根)", gotPdir)
 	}
+}
+
+// assertEmptySliceWire 断言 entries 非 nil 且 JSON 序列化字节为字面 []
+// (T16 空目录白屏根因:pageAll 聚合 var all []FileEntry 空目录恒 nil,
+// gin.H{"files": nil} 序列化出 "files":null,前端 files.map TypeError
+// 白屏——与 task_ids null 同型,json.Marshal 对 nil slice 输出 null、
+// 空 slice 输出 [],len==0 断言钉不住,必须字节级断言)。
+func assertEmptySliceWire(t *testing.T, entries []FileEntry) {
+	t.Helper()
+	if entries == nil {
+		t.Fatal("返回值 = nil slice, 期望非 nil 空 slice(空目录归一化)")
+	}
+	if len(entries) != 0 {
+		t.Fatalf("条目数 = %d, want 0", len(entries))
+	}
+	wire, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if string(wire) != "[]" {
+		t.Fatalf("wire 字节 = %s, 期望字面 [](非 null,契约 FileEntry[])", wire)
+	}
+}
+
+// TestShareListEmptyDirNotEmptyNil 验证空分享目录两种响应形态(list 空
+// 数组 / list 字段缺失)下 ShareList 均返回非 nil 空 slice,wire 为 []。
+func TestShareListEmptyDirNotEmptyNil(t *testing.T) {
+	for name, dataBody := range map[string]string{
+		"list空数组": `{"status":200,"code":0,"data":{"list":[],"metadata":{"_total":0}}}`,
+		"list缺失":  `{"status":200,"code":0,"data":{"metadata":{"_total":0}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, dataBody)
+			}))
+			defer srv.Close()
+
+			s := newTestSession(srv.Client(), nil)
+			s.base = sessionBase{drivePC: srv.URL}
+
+			entries, err := s.ShareList(context.Background(), "pw", "st", "0")
+			if err != nil {
+				t.Fatalf("ShareList: %v", err)
+			}
+			assertEmptySliceWire(t, entries)
+		})
+	}
+}
+
+// TestDriveListEmptyDirNotEmptyNil 验证空网盘目录(list 缺失形态)下
+// DriveList 返回非 nil 空 slice,wire 为 []。
+func TestDriveListEmptyDirNotEmptyNil(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"status":200,"code":0,"data":{"metadata":{"_total":0}}}`)
+	}))
+	defer srv.Close()
+
+	s := newTestSession(srv.Client(), nil)
+	s.base = sessionBase{drivePC: srv.URL}
+
+	entries, err := s.DriveList(context.Background(), "0")
+	if err != nil {
+		t.Fatalf("DriveList: %v", err)
+	}
+	assertEmptySliceWire(t, entries)
 }
 
 // TestCapacity 验证 §2.8 ⑨:member 接口,总容量/已用容量均含 secret 合计。

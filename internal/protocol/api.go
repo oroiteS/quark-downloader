@@ -148,8 +148,12 @@ func (s *Session) Account(ctx context.Context) (AccountInfo, error) {
 // pageAll 是 §2.8 的通用分页循环:fetchPage(page) 请求第 page 页并返回
 // (本页条目, metadata._total);终止条件——本页 0 条,或 total>0 且
 // 累计条数已达 total。任何一页出错整体失败,不返回半截结果。
+// 空目录(首页即 0 条)时返回非 nil 空 slice 而非 nil:gin 直透序列化
+// 对 nil slice 输出 null,前端 files.map 遇 null TypeError 白屏(T16,
+// 与 task_ids null 同型);归一化在本聚合出口一处完成,ShareList/
+// DriveList 两个消费端点随之同保 wire [] 契约。
 func pageAll(ctx context.Context, fetchPage func(page int) ([]FileEntry, int, error)) ([]FileEntry, error) {
-	var all []FileEntry
+	all := []FileEntry{} // 非 nil 起点:空目录聚合结果序列化为 [] 而非 null
 	for page := 1; ; page++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
