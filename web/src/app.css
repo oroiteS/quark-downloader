@@ -146,8 +146,3 @@
 .app-boot p {
   color: var(--color-on-surface-muted);
 }
-
-/* ---- 页面占位（Task 5+ 替换时一并移除）---- */
-.page-placeholder {
-  color: var(--color-on-surface-muted);
-}

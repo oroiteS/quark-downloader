@@ -6,7 +6,11 @@
  *   后端 PUT 为全量替换语义）。校验全在后端（webapi/settings.go：destDir
  *   非空/threads 1–512/max 1–8/themeLock 枚举）——本页不做空值拦截，
  *   400 invalid_settings 的 message 经表单级 role=alert 回显（统一通道，
- *   不散落字段级，前端无字段级校验规则可复述）。
+ *   不散落字段级文案，前端无字段级校验规则可复述）；仅一处明知标注：
+ *   保存失败且 destDir 为空时对下载目录 Input 置 aria-invalid。
+ * - landmark：页面根元素用 <section>（非 main）——AppShell 已有
+ *   <main id="main-content"> 作 skip link 落点，避免 main 嵌套 main
+ *   （与 Parse/Tasks/Drive 同壳先例一致）。
  * - 主题（D7）：radio 三选切换即 applyTheme 本地即时生效，不等保存；
  *   跟随分支（""）返回的 matchMedia 监听卸载函数收进 ref，切换/卸载时
  *   先清，避免 listener 堆积。挂载回显不 apply（当前主题由 main.tsx
@@ -140,26 +144,26 @@ export function Settings() {
 
   if (loading) {
     return (
-      <main className="settings">
+      <section className="settings">
         <p className="settings__busy" role="status">
           <Spinner />
           正在加载设置…
         </p>
-      </main>
+      </section>
     );
   }
   if (loadError) {
     return (
-      <main className="settings">
+      <section className="settings">
         <p className="settings__error" role="alert">
           {loadError}
         </p>
-      </main>
+      </section>
     );
   }
 
   return (
-    <main className="settings">
+    <section className="settings">
       <h1>设置</h1>
 
       <form
@@ -170,11 +174,14 @@ export function Settings() {
       >
         <Card padding="lg">
           <div className="settings__grid">
+            {/* 字段级 aria-invalid 仅标注明知场景（保存失败且 destDir 为空），
+                错误文案仍统一走表单级 role=alert（无字段级校验规则可复述） */}
             <Input
               label="下载目录"
               hint="下载文件的保存目录（绝对路径）"
               value={destDir}
               onChange={(e) => setDestDir(e.target.value)}
+              aria-invalid={saveError !== null && destDir === ''}
             />
 
             <div className="settings__field">
@@ -184,6 +191,7 @@ export function Settings() {
               <select
                 id="settings-threads"
                 className="settings__select"
+                aria-describedby="settings-threads-hint"
                 value={threads}
                 onChange={(e) => setThreads(Number(e.target.value))}
               >
@@ -193,7 +201,9 @@ export function Settings() {
                   </option>
                 ))}
               </select>
-              <p className="settings__hint">单个任务的连接并发数</p>
+              <p className="settings__hint" id="settings-threads-hint">
+                单个任务的连接并发数
+              </p>
             </div>
 
             <div className="settings__field">
@@ -203,6 +213,7 @@ export function Settings() {
               <select
                 id="settings-max-tasks"
                 className="settings__select"
+                aria-describedby="settings-max-tasks-hint"
                 value={maxTasks}
                 onChange={(e) => setMaxTasks(Number(e.target.value))}
               >
@@ -212,7 +223,9 @@ export function Settings() {
                   </option>
                 ))}
               </select>
-              <p className="settings__hint">可同时下载的任务数量</p>
+              <p className="settings__hint" id="settings-max-tasks-hint">
+                可同时下载的任务数量
+              </p>
             </div>
 
             <fieldset className="settings__theme">
@@ -286,6 +299,6 @@ export function Settings() {
           </div>
         </form>
       </Dialog>
-    </main>
+    </section>
   );
 }

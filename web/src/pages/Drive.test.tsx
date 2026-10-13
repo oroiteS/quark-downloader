@@ -216,8 +216,8 @@ describe('网盘页：提交防重与 409 dest_busy（场景 4）', () => {
           resolvePost = resolve;
         }),
     );
-    // 点击前抓引用：Button loading 态 children 换 Spinner（accessible name
-    // 暂失，Task 2 ui 既有行为），以元素引用断言提交态而非按名重查
+    // 点击前抓引用：Button loading 态 children 保留（Spinner 与文本并列且
+    // Spinner aria-hidden 不占可及名，按名仍可查），提交态断言沿用该元素引用
     const submitBtn = screen.getByRole('button', { name: '开始下载' });
     fireEvent.click(submitBtn);
 

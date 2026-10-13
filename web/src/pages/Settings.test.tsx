@@ -6,8 +6,9 @@
 // 4. 退出登录：Dialog 确认 → POST /api/logout → session 清 → 跳 /login
 // 补充钉住：主题切换即时 applyTheme（D7：data-theme 即变不必等保存，含跟随
 // 分支的 matchMedia 驱动）；空 destDir 保存 → 400 invalid_settings 回显后端
-// message（role=alert）；保存中防重复提交；logout 失败 toast error 停留
-// Dialog；GET 失败 role=alert。
+// message（role=alert）且 Input 标 aria-invalid；保存中防重复提交；logout
+// 失败 toast error 停留 Dialog；GET 失败 role=alert；两个 select 的 hint 经
+// aria-describedby 关联。
 // 手法（与 Drive.test 同型）：api 以 vi.mock 模块级替换；toast 以 spyOn 观测；
 // jsdom 未实现 matchMedia——按 theme.test 同款 fake 注入（跟随分支需要）。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -107,6 +108,17 @@ describe('设置页：加载回显（场景 1）', () => {
     expect(screen.getByRole('radio', { name: '浅色' })).toBeChecked();
     expect(screen.getByRole('radio', { name: '跟随系统' })).not.toBeChecked();
     expect(screen.getByRole('radio', { name: '深色' })).not.toBeChecked();
+    // hint 经 aria-describedby 关联（断言指向真实存在的 hint 元素 id）
+    expect(screen.getByLabelText('并发档位')).toHaveAttribute(
+      'aria-describedby',
+      screen.getByText('单个任务的连接并发数').id,
+    );
+    expect(screen.getByLabelText('同时任务数')).toHaveAttribute(
+      'aria-describedby',
+      screen.getByText('可同时下载的任务数量').id,
+    );
+    // 默认无字段级错误
+    expect(screen.getByLabelText('下载目录')).toBeValid();
   });
 
   it('加载中：role=status 提示且不渲染表单', () => {
@@ -159,6 +171,8 @@ describe('设置页：全量保存语义（场景 2，Review Focus #2）', () =>
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'destDir 不可为空',
     );
+    // destDir 为空的保存失败 → Input 标记字段级 aria-invalid
+    expect(screen.getByLabelText('下载目录')).toBeInvalid();
     expect(toastShow).not.toHaveBeenCalledWith('设置已保存', 'success');
   });
 
