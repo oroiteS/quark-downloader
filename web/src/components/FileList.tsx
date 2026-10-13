@@ -3,27 +3,15 @@
  * - 数据源经 props 传入（条目数组 + 回调），不耦合 sid / parse 会话；
  * - 表格语义（thead/th scope），复选框 aria-label 含文件名（读屏可辨行）；
  * - 目录行点击导航（onOpenDir 缺省时目录名不可点）；
- * - 大小 1024 基格式化（formatSize 导出，Task 8 同源复用）；
+ * - 大小格式化统一引 lib/format.ts 的 formatSize（GiB 两位小数，1024 基；
+ *   Ruling T7-W1：删除 Task 6 本地自适应版，消除同名不同义双实现）；
  * - 目录勾选 = 整棵子树交后端展开，行内「含子目录」可见标注；
  * - 全选三态（全/无/部分 indeterminate），触控目标 ≥44px。
  */
 import { useEffect, useRef } from 'react';
 import type { FileEntry } from '../api/types';
+import { formatSize } from '../lib/format';
 import './filelist.css';
-
-/** 大小格式化（1024 基；整数不补 .0，如 1.5 KB / 4 KB / 2 GB）。 */
-export function formatSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
-  let value = bytes;
-  let i = 0;
-  while (value >= 1024 && i < units.length - 1) {
-    value /= 1024;
-    i += 1;
-  }
-  const text = i === 0 ? String(value) : value.toFixed(1).replace(/\.0$/, '');
-  return `${text} ${units[i]}`;
-}
 
 export interface FileListProps {
   /** 当前列表条目（父层决定来源：分享根/子目录/网盘）。 */
@@ -38,6 +26,10 @@ export interface FileListProps {
   onOpenDir?: (entry: FileEntry) => void;
   /** 空列表文案。 */
   emptyText?: string;
+  /** 表格可及名（Ruling T6-M3：嵌入页可定制上下文语义，缺省「文件列表」）。 */
+  tableLabel?: string;
+  /** 全选复选框可及名（Ruling T6-M3，缺省「全选」）。 */
+  selectAllLabel?: string;
 }
 
 export function FileList({
@@ -47,6 +39,8 @@ export function FileList({
   onToggleAll,
   onOpenDir,
   emptyText = '此目录为空',
+  tableLabel = '文件列表',
+  selectAllLabel = '全选',
 }: FileListProps) {
   const allRef = useRef<HTMLInputElement>(null);
   const checkedCount = files.filter((f) => checked.has(f.fid)).length;
@@ -60,7 +54,7 @@ export function FileList({
 
   return (
     <div className="file-list">
-      <table className="file-list__table" aria-label="文件列表">
+      <table className="file-list__table" aria-label={tableLabel}>
         <thead>
           <tr>
             <th scope="col" className="file-list__col-check">
@@ -68,7 +62,7 @@ export function FileList({
                 <input
                   ref={allRef}
                   type="checkbox"
-                  aria-label="全选"
+                  aria-label={selectAllLabel}
                   checked={allChecked}
                   onChange={(e) => onToggleAll(e.target.checked)}
                 />

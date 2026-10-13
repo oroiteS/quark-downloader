@@ -1,5 +1,5 @@
 // 解析页行为钉死（简报 Step 1 五场景 + 补充边界）：
-// 1. 粘贴含链接文本 → POST /api/share/parse {text} → 列表渲染 file_name/size（1024 基格式化）
+// 1. 粘贴含链接文本 → POST /api/share/parse {text} → 列表渲染 file_name/size（GiB 两位小数统一格式，Ruling T7-W1）
 // 2. 目录行点击 → 以其 fid 调 share/files 并渲染子列表 + 面包屑；面包屑返回根
 // 3. 勾选目录+文件 → 下载 Dialog → POST /api/tasks {source:'share', fids, sid, dest} → 跳 /tasks；skipped 逐条 toast
 // 4. kouling:true 响应 → 显示 hint 不报错（无 role=alert、无列表）
@@ -23,9 +23,9 @@ vi.mock('../api/client', () => ({
 }));
 
 // ---- 夹具（与后端实测响应形状逐字一致）----
-const FILE_A = { fid: 'f1', file_name: '报告.pdf', size: 1536, dir: false, share_fid_token: 't1' };
+const FILE_A = { fid: 'f1', file_name: '报告.pdf', size: 2 * 1024 ** 3, dir: false, share_fid_token: 't1' };
 const DIR_B = { fid: 'd1', file_name: '剧集', size: 0, dir: true, share_fid_token: 't2' };
-const FILE_C = { fid: 'f2', file_name: 'README.md', size: 4096, dir: false, share_fid_token: 't3' };
+const FILE_C = { fid: 'f2', file_name: 'README.md', size: 3 * 1024 ** 3, dir: false, share_fid_token: 't3' };
 const SUB_FILE = { fid: 'f3', file_name: '第01集.mkv', size: 2 * 1024 ** 3, dir: false, share_fid_token: 't4' };
 // 子目录内与根同名文件（fix round 1 W2：同名跨目录 rel_path 各归层级不冲突）
 const SUB_SAME_NAME = { fid: 'f4', file_name: 'README.md', size: 4096, dir: false, share_fid_token: 't5' };
@@ -178,8 +178,8 @@ describe('解析页：解析与列表渲染', () => {
     expect(screen.getByRole('table', { name: '文件列表' })).toBeInTheDocument();
     expect(screen.getByText('剧集')).toBeInTheDocument();
     expect(screen.getByText('README.md')).toBeInTheDocument();
-    expect(screen.getByText('1.5 KB')).toBeInTheDocument();
-    expect(screen.getByText('4 KB')).toBeInTheDocument();
+    expect(screen.getByText('2.00 GiB')).toBeInTheDocument();
+    expect(screen.getByText('3.00 GiB')).toBeInTheDocument();
   });
 
   it('输入即写入 session.pendingParseText；重挂载草稿回填（Focus #3）', async () => {
@@ -237,7 +237,7 @@ describe('解析页：目录导航（G10）', () => {
     expect(vi.mocked(api.get).mock.calls[0][0]).toBe(
       '/api/share/files?sid=sid-1&pdir_fid=d1',
     );
-    expect(screen.getByText('2 GB')).toBeInTheDocument();
+    expect(screen.getByText('2.00 GiB')).toBeInTheDocument();
 
     // 面包屑：根 + 当前目录；当前目录 aria-current 标记
     const crumbs = screen.getByRole('navigation', { name: '目录路径' });

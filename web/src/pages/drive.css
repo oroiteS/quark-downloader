@@ -1,0 +1,144 @@
+/**
+ * 网盘页样式（Task 8，控制者预豁免的伴随样式文件）：
+ * 全部走 tokens.css 变量，不硬编码色值/像素间距；焦点环统一 2px
+ * --color-focus + 2px offset；面包屑/操作条/Dialog 沿用解析页同型工艺，
+ * mode 单选组为 fieldset/legend 原生语义（skill：radio 组用 fieldset）。
+ */
+
+.drive {
+  display: grid;
+  gap: var(--space-5);
+  max-inline-size: 60rem;
+}
+
+.drive h1 {
+  margin: 0;
+  font-size: var(--text-2xl);
+  line-height: var(--leading-tight);
+}
+
+/* ---- 面包屑（目录路径逐级回退） ---- */
+.drive__crumbs ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.drive__crumbs li {
+  display: flex;
+  align-items: center;
+}
+
+.drive__crumbs li + li::before {
+  content: '/';
+  padding-inline: var(--space-1);
+  color: var(--color-on-surface-muted);
+}
+
+.drive__crumb-btn {
+  min-block-size: 2.75rem; /* skill：触控目标 ≥44px */
+  padding: var(--space-1) var(--space-2);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-primary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.drive__crumb-btn:hover {
+  text-decoration: underline;
+}
+
+.drive__crumb-btn:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.drive__crumb-current {
+  display: inline-flex;
+  align-items: center;
+  min-block-size: 2.75rem;
+  padding: var(--space-1) var(--space-2);
+  color: var(--color-on-surface-muted);
+}
+
+/* ---- 反馈与加载 ---- */
+.drive__error {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-error);
+}
+
+.drive__busy {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--color-on-surface-muted);
+}
+
+/* ---- 操作条 ---- */
+.drive__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.drive__selected {
+  margin: 0;
+  margin-inline-end: auto;
+  font-size: var(--text-sm);
+  color: var(--color-on-surface-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 下载 Dialog ---- */
+.drive__dialog-form {
+  display: grid;
+  gap: var(--space-4);
+  min-inline-size: min(24rem, 70vw);
+}
+
+/* mode 单选组：fieldset/legend 原生语义，选项触控目标 ≥44px */
+.drive__mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.drive__mode-legend {
+  padding: 0;
+  margin-block-end: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-on-surface);
+}
+
+.drive__mode-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-block-size: 2.75rem;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.drive__mode-option input:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.drive__dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
