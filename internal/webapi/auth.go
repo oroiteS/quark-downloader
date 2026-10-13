@@ -7,6 +7,7 @@ package webapi
 import (
 	"context"
 	"encoding/base64"
+	"log"
 	"net/http"
 	"net/url"
 	"time"
@@ -26,6 +27,16 @@ const qrPollInterval = 1200 * time.Millisecond
 
 // qrPNGSize 登录二维码 PNG 边长（像素，简报钉死 512）。
 const qrPNGSize = 512
+
+// cookiePersistInterval 是登录态凭据的周期落盘节奏（60s）。包级变量：
+// 测试注入短值验证周期写（对齐 sseHeartbeat 的注入先例）。
+//
+// 背景（控制者实测根因）：夸克 __puus 为轮换型凭据——运行期间协议层
+// 随 Set-Cookie 在内存 jar 更新，但 SecretStore 只在登录/导入时写入，
+// 重启读回登录瞬间的旧票，严校验接口已不认 → 登录失效。周期落盘把
+// 轮换持续同步到持久层（protocol/authcheck.go 的心跳只保鲜内存 jar、
+// 不落盘，本层不动 protocol——D9 裁决由 App 层补偿）。
+var cookiePersistInterval = 60 * time.Second
 
 // qrSession 是一次扫码登录会话的最小操作面（protocol.QRLogin 满足）。
 // 接口化仅为测试可注入编排式 fake Poll 序列。
@@ -127,6 +138,9 @@ func (a *App) resetSession() {
 // 保证全进程至多一个心跳，对齐 protocol"调用方负责不重复启动"的约定）。
 // onExpire 只广播 auth 事件通知前端重新登录，会话清理留给用户操作
 // （重新登录覆盖或 logout）。
+//
+// 凭据周期落盘 goroutine 与心跳同一 ctx 派生：stopKeepaliveLocked/
+// resetSession/logout/Close 取消 ctx 即一并停止，无独立生命周期。
 func (a *App) startKeepaliveLocked() {
 	a.stopKeepaliveLocked()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -137,6 +151,58 @@ func (a *App) startKeepaliveLocked() {
 		// 即会话已失效，§2.6）。
 		a.broadcastAuthEvent("expired", false)
 	})
+	go a.persistCookieLoop(ctx)
+}
+
+// persistCookieLoop 周期落盘 goroutine：启动立即落盘一次，之后每
+// cookiePersistInterval 落盘一次；ctx 取消即退出。
+//
+// 立即首轮兼做「启动时立即落盘」：恢复链 restoreSession 成功也经
+// startKeepaliveLocked 走到这里——重启后凭据恢复出登录态的同时即把
+// 当前 jar 重新写回持久层，消除「登录后没重启过但轮换已发生」窗口
+// （上一次运行周期写下的票可能在停机前最后 60s 内又轮换过）。登录
+// 链（扫码/导入）刚同步写过同内容，这一轮是幂等冗余写，成本一次
+// keyring/文件写，可接受。
+func (a *App) persistCookieLoop(ctx context.Context) {
+	ticker := time.NewTicker(cookiePersistInterval)
+	defer ticker.Stop()
+	for {
+		a.persistCookieOnce(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// persistCookieOnce 落盘一次当前凭据。锁内完成「本代存活检查 + jar
+// 快照 + 登录态判定」，锁外执行 SaveCookie——SecretStore 有自己的锁，
+// keyring/文件 IO 不占用 authMu（不阻塞各 handler 的临界区）。
+//
+//   - ctx 已取消（本代已被 stop/resetSession/logout 停掉）→ 不写：
+//     取消与 logout 的 SaveCookie("") 同在 logout 的 authMu 临界区内，
+//     本检查与之互斥，保证 goroutine 不会在清场后覆写；
+//   - jar 无 __puus（LoginState false）→ 跳过：防把好凭据覆盖为空；
+//     空串只由 logout 显式写入（原路径），本 goroutine 永不写空。
+func (a *App) persistCookieOnce(ctx context.Context) {
+	a.authMu.Lock()
+	if ctx.Err() != nil {
+		a.authMu.Unlock()
+		return
+	}
+	auth, jar := a.auth, a.jar
+	cookie := jar.String()
+	loggedIn := auth.LoginState()
+	a.authMu.Unlock()
+
+	if !loggedIn {
+		return
+	}
+	if err := a.secrets.SaveCookie(cookie); err != nil {
+		// 周期写失败不致命（凭据仍是上一轮的票）：记一行，下轮重试。
+		log.Printf("webapi: 凭据周期落盘失败（保留上一轮凭据，下轮重试）: %v", err)
+	}
 }
 
 // stopKeepaliveLocked 停保活心跳（§2.6：ctx 取消即停）。幂等。

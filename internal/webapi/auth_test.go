@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"quark-downloader/internal/protocol"
 )
@@ -890,4 +891,116 @@ func TestAccountNicknameFallsBackToCached(t *testing.T) {
 	if body.Nickname != "扫码昵称" {
 		t.Fatalf("nickname = %q, 期望回退缓存 \"扫码昵称\"（body=%s）", body.Nickname, w.Body)
 	}
+}
+
+// ---- 会话凭据周期落盘（重启不丢登录：__puus 轮换型凭据持续同步持久层）----
+
+// stopPersistGoroutine 收尾停掉 keepalive（含落盘 goroutine），防测试
+// 进程内 goroutine 拿着短周期 ticker 空转。
+func stopPersistGoroutine(app *App) {
+	app.authMu.Lock()
+	app.stopKeepaliveLocked()
+	app.authMu.Unlock()
+}
+
+// waitPersisted 轮询等待 fs.saved 新增写入（n0 为基线长度），返回新增
+// 切片；2 秒仍无写入则失败（落盘 goroutine 异步执行，轮询等待）。
+func waitPersisted(t *testing.T, fs *fakeSecrets, n0 int) []string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		fs.mu.Lock()
+		got := append([]string(nil), fs.saved[n0:]...)
+		fs.mu.Unlock()
+		if len(got) > 0 {
+			return got
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("2 秒内未发生凭据落盘（基线 %d 条后无新增）", n0)
+	return nil
+}
+
+// TestKeepalivePersistsCookiePeriodically 周期落盘（修复主链）：注入
+// 短周期，登录态下断言登录同步写之后仍有落盘发生、内容非空且含
+// __puus（轮换票持续进持久层，重启读回的不是登录瞬间的旧票）。
+func TestKeepalivePersistsCookiePeriodically(t *testing.T) {
+	orig := cookiePersistInterval
+	cookiePersistInterval = 10 * time.Millisecond
+	defer func() { cookiePersistInterval = orig }()
+
+	fa := &fakeAuth{}
+	fs := &fakeSecrets{}
+	app := newAuthTestApp(t, fa, fs)
+	defer stopPersistGoroutine(app)
+
+	if w := doReq(t, app.Router(), http.MethodPost, "/api/login/cookie",
+		map[string]string{"text": "__puus=u; __pus=p"}); w.Code != 200 {
+		t.Fatalf("导入 Cookie 状态码 = %d（body=%s）", w.Code, w.Body)
+	}
+	fs.mu.Lock()
+	n0 := len(fs.saved) // 登录链同步写基线
+	fs.mu.Unlock()
+
+	got := waitPersisted(t, fs, n0)
+	for _, s := range got {
+		if s == "" || !strings.Contains(s, "__puus") {
+			t.Fatalf("周期落盘内容 = %q, 期望非空且含 __puus", s)
+		}
+	}
+}
+
+// TestRestorePersistsCookieImmediately 启动立即落盘（消除「登录后没
+// 重启过但轮换已发生」窗口）：恢复链 Start 成功后、周期 tick 到来前
+// （周期拉长为 1h 排除周期写）即落盘一次恢复串。
+func TestRestorePersistsCookieImmediately(t *testing.T) {
+	orig := cookiePersistInterval
+	cookiePersistInterval = time.Hour // 周期不可达：写入必来自启动立即轮
+	defer func() { cookiePersistInterval = orig }()
+
+	fa := &fakeAuth{}
+	fs := &fakeSecrets{}
+	if err := fs.SaveCookie("__pus=p; __puus=tok"); err != nil {
+		t.Fatalf("预置凭据: %v", err)
+	}
+	app := newAuthTestApp(t, fa, fs)
+	defer stopPersistGoroutine(app)
+
+	fs.mu.Lock()
+	n0 := len(fs.saved) // 预置写入基线
+	fs.mu.Unlock()
+
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	got := waitPersisted(t, fs, n0)
+	if len(got) != 1 || got[0] != "__pus=p; __puus=tok" {
+		t.Fatalf("启动落盘 = %q, 期望恰一次写入恢复串 __pus=p; __puus=tok", got)
+	}
+}
+
+// TestKeepalivePersistSkipsWithoutPuus jar 无 __puus（未登录）时落盘
+// goroutine 不写：防把 Store 里的好凭据覆盖为空（空串只由 logout 显式
+// 写入，走原路径）。
+func TestKeepalivePersistSkipsWithoutPuus(t *testing.T) {
+	orig := cookiePersistInterval
+	cookiePersistInterval = 5 * time.Millisecond
+	defer func() { cookiePersistInterval = orig }()
+
+	fa := &fakeAuth{}
+	fs := &fakeSecrets{}
+	app := newAuthTestApp(t, fa, fs)
+
+	// 防御路径：keepalive（含落盘 goroutine）在 jar 有 Cookie 但无
+	// __puus 的状态下被启动——任何轮次都不得触碰 Store。
+	app.authMu.Lock()
+	app.jar.LoadFromString("a=1")
+	app.startKeepaliveLocked()
+	app.authMu.Unlock()
+
+	time.Sleep(25 * time.Millisecond) // 跨越 4-5 个周期轮次
+	if n := len(fs.saved); n != 0 {
+		t.Fatalf("无 __puus 仍落盘 %d 次, 期望 0（防好凭据被覆盖为空）", n)
+	}
+	stopPersistGoroutine(app)
 }
