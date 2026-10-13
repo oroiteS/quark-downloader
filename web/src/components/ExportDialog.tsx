@@ -4,7 +4,9 @@
  * - 五格式枚举与后端 export.go 逐字对齐（plain/named/aria2/curl/motrix）；
  *   简报钉死「tab 切换各调 export」——每次切换都 POST /api/links/export 并
  *   以 res.text() 纯文本上屏（T3 账本：apiFetch 2xx 硬 res.json() 会崩）。
- * - rel_path 由前端组装：links 响应条目无 rel_path 字段，根列表=file_name。
+ * - items 的 rel_path 由父层按勾选路径上下文组装后透传（fix round 1 W2：
+ *   links 响应条目无 rel_path 字段，Parse 以勾选来源相对路径——根=file_name，
+ *   子目录=面包屑相对路径/file_name——组装，named 等格式从此保层级）。
  * - ARIA tabs 模式：tablist/tab/tabpanel + aria-selected + 方向键/Home/End
  *   （选中随焦点移动，roving focus）；容器复用 ui Dialog 的焦点陷阱。
  * - 代际防护（genRef）：快速切换格式时旧格式迟到响应不覆盖新文本。
@@ -13,14 +15,14 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { Button, Dialog, toast } from './ui';
 import { exportLinksText } from '../api/share';
-import type { ExportFormat } from '../api/share';
+import type { ExportFormat, LinkExportItem } from '../api/share';
 import './export-dialog.css';
 
 export interface ExportDialogProps {
   open: boolean;
   onClose: () => void;
-  /** 直链条目（file_name + url；rel_path 由本组件以 file_name 组装）。 */
-  items: ReadonlyArray<{ file_name: string; url: string }>;
+  /** 直链条目（rel_path 由父层按勾选路径上下文组装，此处原样透传）。 */
+  items: ReadonlyArray<LinkExportItem>;
   /** 后端 expires_hint 时效文案，原样上屏（语义：尽快使用/失效重取）。 */
   expiresHint?: string;
 }
@@ -57,10 +59,7 @@ export function ExportDialog({
     setLoading(true);
     setError(null);
     setText('');
-    exportLinksText(
-      items.map((i) => ({ rel_path: i.file_name, url: i.url })),
-      format,
-    )
+    exportLinksText(items, format)
       .then((t) => {
         if (genRef.current === gen) setText(t);
       })

@@ -8,8 +8,10 @@
 //   {task_ids[], skipped:[{fid,name,reason}]}（dest=相对全局 destDir 的子目录
 //   前缀，空串=全局根；目录勾选=整棵子树交后端展开）。
 // - POST /api/links {source:'share', fids[], sid} →
-//   {items:[{file_name,size,url,score}], expires_hint}（条目无 rel_path 字段，
-//   导出时由前端以 file_name 组装）。
+//   {items:[{file_name,size,url,score}], expires_hint}（条目无 fid/rel_path
+//   字段；fix round 1 W1：目录项由前端过滤不上送——后端对目录 fid 无处理
+//   必报错；W2：导出 rel_path 由前端按勾选来源相对路径组装——根=file_name，
+//   子目录=面包屑相对路径/file_name，同名按勾选序对位）。
 // - POST /api/links/export {items:[{rel_path,url}], format} → 200 纯文本
 //   （c.String，非 JSON！）。T3 账本交接：apiFetch 2xx 硬 res.json() 对文本
 //   响应会崩——exportLinksText 走原始 fetch + res.text() 专用通道；非 2xx
@@ -66,7 +68,7 @@ export function createShareTasks(
   });
 }
 
-/** 批量取直链（选中项原样上送；时效文案在 expires_hint）。 */
+/** 批量取直链（W1：目录项由调用方过滤后再上送；时效文案在 expires_hint）。 */
 export function getShareLinks(
   sid: string,
   fids: readonly string[],
@@ -81,7 +83,8 @@ export function getShareLinks(
 /** 导出五格式（export.go 枚举，顺序即默认 tab 序）。 */
 export type ExportFormat = 'plain' | 'named' | 'aria2' | 'curl' | 'motrix';
 
-/** 导出请求单条（rel_path 由前端组装：根列表 = file_name）。 */
+/** 导出请求单条（W2：rel_path 由调用方按勾选路径上下文组装——根=file_name，
+ *  子目录=面包屑相对路径/file_name，named 等格式保层级、重名不冲突）。 */
 export interface LinkExportItem {
   rel_path: string;
   url: string;

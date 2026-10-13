@@ -1,5 +1,6 @@
 // ExportDialog 行为钉死（简报 Step 1：五格式 tab 切换各调 export 且文本上屏）：
-// - open 即按当前格式（默认 plain）调 exportLinksText，items 组装 rel_path=file_name
+// - open 即按当前格式（默认 plain）调 exportLinksText，items（rel_path+url）原样透传
+//   （fix round 1 W2：rel_path 的层级组装责任在父层 Parse，组件不再以 file_name 二次组装）
 // - 五 tab aria 语义（tablist/tab/aria-selected/tabpanel）+ 方向键/Home/End 键盘模式
 // - 切换格式各自重新调 export，文本上屏；快速切换旧响应不覆盖新格式（代际防护）
 // - 复制按钮 → clipboard.writeText(当前文本) + toast 反馈；clipboard 不可用 → 失败 toast
@@ -12,8 +13,8 @@ import { ExportDialog } from './ExportDialog';
 import { toast } from './ui';
 
 const ITEMS = [
-  { file_name: 'a.mp4', url: 'https://dl.example/1' },
-  { file_name: 'sub/b.mkv', url: 'https://dl.example/2' },
+  { rel_path: 'a.mp4', url: 'https://dl.example/1' },
+  { rel_path: 'sub/b.mkv', url: 'https://dl.example/2' },
 ];
 const EXPIRES_HINT = '直链有时效，请尽快使用';
 
@@ -37,7 +38,7 @@ function renderDialog(
   overrides: {
     open?: boolean;
     onClose?: () => void;
-    items?: Array<{ file_name: string; url: string }>;
+    items?: Array<{ rel_path: string; url: string }>;
     expiresHint?: string;
   } = {},
 ): void {
@@ -83,7 +84,7 @@ describe('ExportDialog', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
-  it('打开默认 plain：五 tab 齐备、aria-selected 正确、文本上屏、items 组装 rel_path=file_name', async () => {
+  it('打开默认 plain：五 tab 齐备、aria-selected 正确、文本上屏、items 原样透传', async () => {
     renderDialog();
 
     const tablist = screen.getByRole('tablist', { name: '导出格式' });

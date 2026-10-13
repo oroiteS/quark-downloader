@@ -27,6 +27,8 @@ const FILE_A = { fid: 'f1', file_name: '报告.pdf', size: 1536, dir: false, sha
 const DIR_B = { fid: 'd1', file_name: '剧集', size: 0, dir: true, share_fid_token: 't2' };
 const FILE_C = { fid: 'f2', file_name: 'README.md', size: 4096, dir: false, share_fid_token: 't3' };
 const SUB_FILE = { fid: 'f3', file_name: '第01集.mkv', size: 2 * 1024 ** 3, dir: false, share_fid_token: 't4' };
+// 子目录内与根同名文件（fix round 1 W2：同名跨目录 rel_path 各归层级不冲突）
+const SUB_SAME_NAME = { fid: 'f4', file_name: 'README.md', size: 4096, dir: false, share_fid_token: 't5' };
 
 const PARSE_OK = { sid: 'sid-1', pwd_id: 'pwd-1', passcode: '', files: [FILE_A, DIR_B, FILE_C] };
 const LINKS_OK = {
@@ -40,6 +42,8 @@ const SHARE_TEXT = '链接：https://pan.quark.cn/s/abcd 提取码：x9kz';
 let parseResponse: unknown;
 /** 可配置的 POST /api/tasks 响应（skipped 逐条反馈断言用）。 */
 let taskResponse: unknown;
+/** 可配置的 POST /api/links 响应（W1/W2 导出用例覆写）。 */
+let linksResponse: unknown;
 /** share/files 目录表：pdir_fid → files（'' 为根）。 */
 let dirTable: Record<string, unknown[]>;
 /** 记录 share/files 实际请求过的 pdir_fid 序列。 */
@@ -65,7 +69,11 @@ function mockApiDefaults(): void {
       if (res instanceof ApiError) throw res;
       return res as never;
     }
-    if (path === '/api/links') return LINKS_OK as never;
+    if (path === '/api/links') {
+      const res = linksResponse;
+      if (res instanceof ApiError) throw res;
+      return res as never;
+    }
     throw new Error(`unexpected POST ${path}`);
   });
 }
@@ -138,7 +146,8 @@ beforeEach(() => {
     task_ids: ['t-1', 't-2'],
     skipped: [{ fid: 'f1', name: '报告.pdf', reason: '已存在' }],
   };
-  dirTable = { '': [FILE_A, DIR_B, FILE_C], d1: [SUB_FILE] };
+  linksResponse = LINKS_OK;
+  dirTable = { '': [FILE_A, DIR_B, FILE_C], d1: [SUB_FILE, SUB_SAME_NAME] };
   filesLog = [];
   useSession.setState({
     loggedIn: true,
@@ -502,5 +511,106 @@ describe('解析页：生成直链与五格式导出', () => {
     fireEvent.click(screen.getByRole('button', { name: '复制' }));
     await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('TEXT-plain'));
     expect(toastShow).toHaveBeenCalledWith('已复制到剪贴板', 'success');
+  });
+
+  // ---- fix round 1 W1：目录项不参与直链 ----
+  it('勾选目录+文件生成直链：links 请求仅含文件 fid，toast「已忽略 1 个目录」', async () => {
+    renderParse();
+    await parseShareText();
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 报告.pdf' }));
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: '选择 剧集（含子目录）' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '生成直链' }));
+    await screen.findByRole('dialog');
+
+    expect(vi.mocked(api.post)).toHaveBeenCalledWith('/api/links', {
+      source: 'share',
+      fids: ['f1'],
+      sid: 'sid-1',
+    });
+    expect(toastShow).toHaveBeenCalledWith('已忽略 1 个目录', 'info');
+  });
+
+  it('仅勾选目录：生成直链禁用，不请求 links', async () => {
+    renderParse();
+    await parseShareText();
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: '选择 剧集（含子目录）' }),
+    );
+
+    const btn = screen.getByRole('button', { name: '生成直链' });
+    expect(btn).toBeDisabled();
+    fireEvent.click(btn);
+    await flush();
+    expect(
+      vi.mocked(api.post).mock.calls.some(([p]) => p === '/api/links'),
+    ).toBe(false);
+  });
+
+  // ---- fix round 1 W2：勾选路径上下文 → rel_path 含层级 ----
+  it('子目录内勾选生成直链：导出 rel_path 含面包屑层级', async () => {
+    linksResponse = {
+      items: [
+        {
+          file_name: '第01集.mkv',
+          size: 2 * 1024 ** 3,
+          url: 'https://dl.example/u3',
+          score: 10,
+        },
+      ],
+      expires_hint: '直链有时效，请尽快使用',
+    };
+    renderParse();
+    await parseShareText();
+    fireEvent.click(screen.getByRole('button', { name: '剧集' }));
+    fireEvent.click(
+      await screen.findByRole('checkbox', { name: '选择 第01集.mkv' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '生成直链' }));
+    await screen.findByRole('dialog');
+    await vi.waitFor(() =>
+      expect(screen.getByLabelText('导出内容')).toHaveValue('TEXT-plain'),
+    );
+
+    const fetchMock = vi.mocked(globalThis.fetch);
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as {
+      items: Array<{ rel_path: string; url: string }>;
+    };
+    expect(body.items).toEqual([
+      { rel_path: '剧集/第01集.mkv', url: 'https://dl.example/u3' },
+    ]);
+  });
+
+  it('跨目录同名文件勾选导出：rel_path 按勾选序各归层级，重名不冲突', async () => {
+    linksResponse = {
+      items: [
+        { file_name: 'README.md', size: 4096, url: 'https://dl.example/u-root', score: 10 },
+        { file_name: 'README.md', size: 4096, url: 'https://dl.example/u-sub', score: 10 },
+      ],
+      expires_hint: '直链有时效，请尽快使用',
+    };
+    renderParse();
+    await parseShareText();
+    // 根列表 README.md（f2）先勾，子目录同名 README.md（f4）后勾
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 README.md' }));
+    fireEvent.click(screen.getByRole('button', { name: '剧集' }));
+    fireEvent.click(
+      await screen.findByRole('checkbox', { name: '选择 README.md' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '生成直链' }));
+    await screen.findByRole('dialog');
+    await vi.waitFor(() =>
+      expect(screen.getByLabelText('导出内容')).toHaveValue('TEXT-plain'),
+    );
+
+    const fetchMock = vi.mocked(globalThis.fetch);
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as {
+      items: Array<{ rel_path: string; url: string }>;
+    };
+    expect(body.items).toEqual([
+      { rel_path: 'README.md', url: 'https://dl.example/u-root' },
+      { rel_path: '剧集/README.md', url: 'https://dl.example/u-sub' },
+    ]);
   });
 });
