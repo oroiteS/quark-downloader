@@ -5,9 +5,11 @@
  *   Capacity），按 1024 基准换算 GiB 显示——“G”即 GiB（简报钉死）。
  * - 环半径取 100/(2π)：周长恰为 100，dashoffset 数值即“剩余占比×100”，
  *   弧度 = (dasharray - dashoffset) / dasharray = used/total。两个 circle
- *   带 stroke presentation attribute 兜底（T10 真机验收④）：CSS 类仍可
- *   覆盖（特异性高于 presentation attribute），变量/优先级任何异常下环
- *   依 token 色可见。
+ *   的 stroke 兜底走 inline style（T10 真机验收④，round 2 审查 I-1 修正）：
+ *   var() 在 SVG presentation attribute 中不生效（引擎未实现，解析失败
+ *   回落 none，兜底形同虚设），inline style 的 var() 合法有效；inline
+ *   优先级高于类规则（app.css）正是兜底语义——类规则被浏览器插件改写/
+ *   失效时，inline 仍按 token 变量渲染，主题切换依旧跟随变量。
  * - 头像（T10 真机验收③）：avatar 有值→32px 圆形 img；无值或加载失败→
  *   昵称首字符占位圈。img alt=""（装饰——昵称已承载语义，skill：装饰性
  *   图不进无障碍树）；占位圈同理 aria-hidden。
@@ -75,7 +77,7 @@ export function AccountBadge() {
           cy="20"
           r={RADIUS}
           fill="none"
-          stroke="var(--color-border)"
+          style={{ stroke: 'var(--color-border)' }}
           strokeWidth="4"
         />
         <circle
@@ -84,7 +86,7 @@ export function AccountBadge() {
           cy="20"
           r={RADIUS}
           fill="none"
-          stroke="var(--color-primary)"
+          style={{ stroke: 'var(--color-primary)' }}
           strokeWidth="4"
           strokeLinecap="round"
           strokeDasharray={100}

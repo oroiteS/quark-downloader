@@ -21,6 +21,7 @@ export interface DialogProps {
  * T10 真机验收修复（三重关闭缺失）：
  * - Esc 监听提至 document 级（原绑 overlay，焦点漂出后失效——T2 deferred
  *   核销）；Escape 分支随之从 overlay onKeyDown 移除，防同一次按键双触发。
+ *   isComposing 过滤（round 2 I-2）：IME 取消候选的 Esc 不关 Dialog。
  * - 右上角关闭按钮（aria-label="关闭"，44px 触达，DOM 序在 children 之后
  *   =陷阱集末位，不改变「首焦点入首个业务控件」）。
  * - 遮罩 mousedown（target 为 overlay 本身才关——在面板内按下拖选到遮罩
@@ -53,6 +54,9 @@ export function Dialog({ open, onClose, title, children }: DialogProps) {
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      // IME 组合中的 Esc 是取消候选（isComposing=true），不关 Dialog
+      // （round 2 审查 I-2：中文输入法场景会误关并丢失未提交输入）
+      if (event.isComposing) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         onClose();

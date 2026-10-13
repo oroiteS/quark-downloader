@@ -1,6 +1,7 @@
 // Dialog 行为钉死（简报 Step 1 + skill Modal 模式 + T10 真机验收修复）：
 // 打开 role="dialog"/aria-modal/标题关联且焦点入内；Tab 循环不出界；
 // Esc 关闭（document 级监听——焦点漂出 overlay 仍生效，T2 deferred 核销）；
+// IME 组合中取消候选的 Esc（isComposing）不关闭（round 2 I-2）；
 // 右上角关闭按钮（aria-label="关闭"）点击关闭；遮罩 mousedown 关闭；
 // 关闭后焦点归还先前聚焦元素。
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -81,6 +82,23 @@ describe('Dialog', () => {
     // 模拟焦点漂出：body 持焦（不聚焦 dialog 内任何元素），事件直接派发到 body
     expect(document.activeElement).not.toBe(screen.getByRole('dialog'));
     fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('IME 组合中按 Esc 取消候选（isComposing=true）不关闭，随后的普通 Esc 照常关闭（round 2 I-2）', () => {
+    const onClose = vi.fn();
+    render(
+      <Dialog open onClose={onClose} title="t">
+        <input type="text" aria-label="名称" />
+      </Dialog>,
+    );
+    const input = screen.getByLabelText('名称');
+    input.focus();
+    // 中文输入法组合中取消候选：Chrome/Edge 派发 key='Escape' 且 isComposing=true
+    fireEvent.keyDown(input, { key: 'Escape', isComposing: true });
+    expect(onClose).not.toHaveBeenCalled();
+    // 非 IME Esc 仍正常关闭（过滤只针对组合态）
+    fireEvent.keyDown(input, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
