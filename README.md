@@ -2,6 +2,31 @@
 
 夸克网盘下载器（Go 实现）。技术选型与核心算法原理见 [docs/](docs/)。
 
+## 构建与开发
+
+前端源码在 [web/](web/)（React + Vite，pnpm 管理）：
+
+```bash
+cd web
+pnpm install          # 安装依赖
+pnpm dev              # 开发服务器，/api 代理到 127.0.0.1:8080 的后端
+pnpm test             # 全量测试（Vitest）
+pnpm build            # 先跑 typecheck（prebuild 链），产物直落 internal/webapi/web/dist
+```
+
+后端为 Go 单二进制，前端产物经 `//go:embed`（internal/webapi/web/static.go）打进二进制：
+
+```bash
+go build -o feiwu ./cmd/feiwu
+./feiwu
+```
+
+运行时环境变量（均可选）：
+
+- `FEIWU_PORT`：监听端口，缺省 `127.0.0.1` 随机端口（实际地址打印在启动日志）。
+- `FEIWU_DATA_DIR`：数据目录，优先级最高；缺省走平台默认目录（Windows 另有 portable 判据）。
+- `FEIWU_NO_BROWSER=1`：跳过启动后自动打开浏览器（无头/测试环境用）。
+
 ## App 图标
 
 ![飞舞 App 图标](assets/icon.png)

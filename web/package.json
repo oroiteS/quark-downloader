@@ -6,6 +6,7 @@
   "packageManager": "pnpm@12.11.2",
   "scripts": {
     "dev": "vite",
+    "prebuild": "pnpm typecheck",
     "build": "tsc -b && vite build",
     "test": "vitest run",
     "typecheck": "tsc -b"
