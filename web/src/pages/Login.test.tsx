@@ -243,6 +243,78 @@ describe('扫码登录', () => {
     expect(screen.getByRole('img')).toBeInTheDocument();
   });
 
+  it('got_ticket 后账户确认失败：状态区 role=alert 可见错误 + 重新生成入口，不跳转、不误写登录态', async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === '/api/login/qr/state') {
+        const next = stateQueue.shift();
+        if (next instanceof Error) throw next;
+        return (next ?? { state: 'waiting', logged_in: false }) as never;
+      }
+      if (path === '/api/account') {
+        // 账户端点 500:code 取后端通用码 internal(非识别 code 的兜底语义)
+        throw new ApiError('internal', '获取账户信息失败', 500);
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+    stateQueue = [
+      { state: 'waiting', logged_in: false },
+      { state: 'got_ticket', logged_in: true, nickname: '盘友甲' },
+    ];
+    await renderLogin();
+    await advancePolls(2); // waiting → got_ticket（终态停止）
+
+    // 用户可见错误反馈：不再停留误导性的「登录成功」+「欢迎」
+    expect(screen.getByRole('alert')).toHaveTextContent('登录确认失败');
+    expect(screen.queryByText('登录成功')).toBeNull();
+    expect(screen.queryByText('欢迎，盘友甲')).toBeNull();
+    expect(
+      screen.getByRole('button', { name: '重新生成二维码' }),
+    ).toBeInTheDocument();
+    expect(useSession.getState().loggedIn).toBe(false);
+    expect(screen.getByTestId('loc')).toHaveTextContent('/login');
+    expect(seen).toEqual(['/login']);
+  });
+
+  it('账户确认失败后重新生成并二次扫码成功：仍触发确认并正常跳 /（enteredRef 复位）', async () => {
+    let accountDown = true;
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === '/api/login/qr/state') {
+        const next = stateQueue.shift();
+        if (next instanceof Error) throw next;
+        return (next ?? { state: 'waiting', logged_in: false }) as never;
+      }
+      if (path === '/api/account') {
+        if (accountDown) {
+          throw new ApiError('internal', '获取账户信息失败', 500);
+        }
+        return ACCOUNT as never;
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+    stateQueue = [
+      { state: 'waiting', logged_in: false },
+      { state: 'got_ticket', logged_in: true, nickname: '盘友甲' },
+    ];
+    await renderLogin();
+    await advancePolls(2);
+    expect(screen.getByRole('alert')).toHaveTextContent('登录确认失败');
+
+    // 失败后重新生成（enteredRef 复位）→ 二次扫码 got_ticket 仍走确认链路
+    fireEvent.click(screen.getByRole('button', { name: '重新生成二维码' }));
+    accountDown = false;
+    stateQueue = [{ state: 'got_ticket', logged_in: true, nickname: '盘友甲' }];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0); // flush restart 的 POST start
+    });
+    expect(startCalls()).toBe(2);
+    await advancePolls(1); // 二次 got_ticket → enterApp（账户端点已恢复）
+
+    expect(useSession.getState().loggedIn).toBe(true);
+    expect(useSession.getState().nickname).toBe('盘友甲');
+    expect(screen.getByTestId('loc')).toHaveTextContent('/');
+    expect(seen).toEqual(['/login', '/']);
+  });
+
   it('start 失败（502）：显示错误原因与重试入口，不渲染二维码', async () => {
     vi.mocked(api.post).mockImplementation(async (path: string) => {
       if (path === '/api/login/qr/start') {
