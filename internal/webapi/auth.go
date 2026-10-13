@@ -176,30 +176,30 @@ func (a *App) persistCookieLoop(ctx context.Context) {
 	}
 }
 
-// persistCookieOnce 落盘一次当前凭据。锁内完成「本代存活检查 + jar
-// 快照 + 登录态判定」，锁外执行 SaveCookie——SecretStore 有自己的锁，
-// keyring/文件 IO 不占用 authMu（不阻塞各 handler 的临界区）。
+// persistCookieOnce 落盘一次当前凭据。全程持 authMu：「本代存活检查 +
+// jar 快照 + 登录态判定 + SaveCookie」在同一临界区内一气呵成——快照与
+// 写入之间没有 authMu 空窗，logout 清场（ctx 取消与 SaveCookie("") 同在
+// logout 的 authMu 临界区内）与本次落盘严格串行，旧票不可能在清场后
+// 复活已删凭据。与既有登录链 handleQRState/handleCookieImport 持 authMu
+// 调 SaveCookie 同模式（fix round 1 控制者裁决）：锁序 authMu→store.mu
+// 单向无环，SecretStore 方法封闭、从不反向等 authMu，无死锁；代价是
+// handler 临界区潜在多等一次 ms 级 keyring/文件 IO，可接受。
 //
 //   - ctx 已取消（本代已被 stop/resetSession/logout 停掉）→ 不写：
-//     取消与 logout 的 SaveCookie("") 同在 logout 的 authMu 临界区内，
-//     本检查与之互斥，保证 goroutine 不会在清场后覆写；
+//     与 logout 临界区互斥，本代死后任何轮次都不再触碰 Store；
 //   - jar 无 __puus（LoginState false）→ 跳过：防把好凭据覆盖为空；
 //     空串只由 logout 显式写入（原路径），本 goroutine 永不写空。
 func (a *App) persistCookieOnce(ctx context.Context) {
 	a.authMu.Lock()
-	if ctx.Err() != nil {
-		a.authMu.Unlock()
-		return
-	}
-	auth, jar := a.auth, a.jar
-	cookie := jar.String()
-	loggedIn := auth.LoginState()
-	a.authMu.Unlock()
+	defer a.authMu.Unlock()
 
-	if !loggedIn {
+	if ctx.Err() != nil {
 		return
 	}
-	if err := a.secrets.SaveCookie(cookie); err != nil {
+	if !a.auth.LoginState() {
+		return
+	}
+	if err := a.secrets.SaveCookie(a.jar.String()); err != nil {
 		// 周期写失败不致命（凭据仍是上一轮的票）：记一行，下轮重试。
 		log.Printf("webapi: 凭据周期落盘失败（保留上一轮凭据，下轮重试）: %v", err)
 	}

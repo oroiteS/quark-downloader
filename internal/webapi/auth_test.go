@@ -115,14 +115,20 @@ func (f *fakeAuth) StartKeepalive(ctx context.Context, onExpire func()) {
 	f.kaOnExpire = onExpire
 }
 
-// fakeSecrets SecretStore 假实现：记录每次保存。
+// fakeSecrets SecretStore 假实现：记录每次保存。delay 模拟真实
+// keyring/文件 IO 的毫秒级延迟（默认 0 = 纳秒级，既有测试不受影响）；
+// 睡眠在 mu 之外——并发调用可乱序落账，正是真实 Store 的写序语义。
 type fakeSecrets struct {
 	mu    sync.Mutex
 	saved []string
 	err   error
+	delay time.Duration
 }
 
 func (f *fakeSecrets) SaveCookie(s string) error {
+	if f.delay > 0 {
+		time.Sleep(f.delay)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.saved = append(f.saved, s)
@@ -606,6 +612,51 @@ func TestLogoutCleansAll(t *testing.T) {
 	// 进行中的扫码会话一并作废。
 	if w2 := doReq(t, app.Router(), http.MethodGet, "/api/login/qr/state", nil); w2.Code != 400 {
 		t.Fatalf("logout 后 state 状态码 = %d, 期望 400", w2.Code)
+	}
+}
+
+// TestLogoutConcurrentPersistDoesNotRevive logout 与周期落盘并发不复活
+// 已删凭据（fix round 1 定向回归，模式对齐 TestLogoutCleansAll）：给
+// SaveCookie 注入 ms 级延迟模拟真实 keyring/文件 IO，在落盘 goroutine
+// 高频写的同时执行 logout。持久化全程持 authMu（快照与写入无空窗），
+// logout 的 "" 覆盖之后任何轮次都在临界区内先查 ctx.Err——本代已取消，
+// 不再触碰 Store，故 logout 返回后空串必须是持久层最终内容（旧票复活
+// → 重启后登录又失效，即周期落盘修复目标的反面）。
+func TestLogoutConcurrentPersistDoesNotRevive(t *testing.T) {
+	orig := cookiePersistInterval
+	cookiePersistInterval = time.Millisecond
+	defer func() { cookiePersistInterval = orig }()
+
+	fa := &fakeAuth{}
+	fs := &fakeSecrets{delay: 5 * time.Millisecond}
+	app := newAuthTestApp(t, fa, fs)
+	defer stopPersistGoroutine(app)
+
+	// 进入登录态：导入 Cookie 成功并启动 keepalive（含落盘 goroutine）。
+	if w := doReq(t, app.Router(), http.MethodPost, "/api/login/cookie",
+		map[string]string{"text": "__puus=u; __pus=p"}); w.Code != 200 {
+		t.Fatalf("导入 Cookie 状态码 = %d（body=%s）", w.Code, w.Body)
+	}
+
+	// logout 与高频周期落盘并发执行。
+	done := make(chan int, 1)
+	go func() {
+		done <- doReq(t, app.Router(), http.MethodPost, "/api/logout", nil).Code
+	}()
+	if code := <-done; code != http.StatusOK {
+		t.Fatalf("logout 状态码 = %d, 期望 200", code)
+	}
+
+	// logout 返回后再跨多个周期轮次：最终内容必须是 logout 写下的空串。
+	time.Sleep(20 * time.Millisecond)
+	fs.mu.Lock()
+	last := ""
+	if n := len(fs.saved); n > 0 {
+		last = fs.saved[n-1]
+	}
+	fs.mu.Unlock()
+	if last != "" {
+		t.Fatalf("logout 后持久层最终内容 = %q, 期望空串（旧票复活已删凭据）", last)
 	}
 }
 
