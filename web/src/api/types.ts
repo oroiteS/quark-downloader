@@ -213,20 +213,6 @@ export interface ParseResult {
   files: FileEntry[];
 }
 
-/** 直链条目（links.go handleLinks items 元素）。 */
-export interface LinkItem {
-  file_name: string;
-  size: number;
-  url: string;
-  score: number;
-}
-
-/** 批量取直链响应（links.go；expires_hint 为时效提示文案）。 */
-export interface LinksResult {
-  items: LinkItem[];
-  expires_hint: string;
-}
-
 // ---- SSE 帧型（events.go Event/progressPayload/finalPayload/authPayload）----
 
 export type SseEventType = 'hello' | 'task_progress' | 'task_final' | 'auth';

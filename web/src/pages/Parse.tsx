@@ -1,5 +1,5 @@
 /**
- * 解析页（Task 6，/ 路由）：粘贴解析 → 目录导航 → 勾选下载/直链导出。
+ * 解析页（Task 6，/ 路由）：粘贴解析 → 目录导航 → 勾选下载。
  *
  * 页面流（简报钉死）：
  * - 粘贴框（原生 textarea，T5 先例：分享文本常含多行口令，ui 无 Textarea）
@@ -8,10 +8,6 @@
  * - 勾选（fid 全局集合跨目录保留；目录勾选=整棵子树交后端展开，FileList
  *   标注「含子目录」）→「下载选中」Dialog（dest 留空=全局 destDir）→
  *   POST tasks → skipped 逐条 toast → 跳 /tasks（简报明示的业务跳转）；
- * - 「生成直链」→ POST links → ExportDialog 五格式导出。fix round 1：
- *   W1 目录项不上送（过滤发生 toast「已忽略 N 个目录」，过滤后为空按钮
- *   禁用）；W2 勾选记录来源相对路径（根=file_name，子目录=面包屑相对
- *   路径/file_name），导出 rel_path 按其组装，named 等格式保层级。
  * - kouling:true 响应显示 hint 不报错。
  *
  * 边界（T4 交接）：会话过期跳 /login 由守卫负责，本页不订阅过期；
@@ -23,10 +19,8 @@ import type { FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, Dialog, Input, Spinner, toast } from '../components/ui';
 import { FileList } from '../components/FileList';
-import { ExportDialog } from '../components/ExportDialog';
 import {
   createShareTasks,
-  getShareLinks,
   isKoulingParse,
   listShareFiles,
   parseShareText,
@@ -44,19 +38,6 @@ interface Crumb {
 
 const ROOT_CRUMB = '分享根目录';
 
-/** 勾选条目的路径上下文（fix round 1：W1 目录过滤 + W2 rel_path 组装）。 */
-interface CheckedMeta {
-  dir: boolean;
-  /** 相对分享根路径：根列表=file_name；子目录=面包屑相对路径/file_name。 */
-  path: string;
-}
-
-/** 导出载荷：items 的 rel_path 已按勾选路径上下文组装（喂 ExportDialog）。 */
-interface ExportPayload {
-  items: Array<{ rel_path: string; url: string }>;
-  expiresHint: string;
-}
-
 export function Parse() {
   const navigate = useNavigate();
   const [text, setText] = useState(() => useSession.getState().pendingParseText);
@@ -70,19 +51,11 @@ export function Parse() {
   const [loadingFiles, setLoadingFiles] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
   const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
-  // 勾选上下文（与 checked 同步增删）：勾选来源条目的 dir + 相对路径
-  const [checkedMeta, setCheckedMeta] = useState<ReadonlyMap<string, CheckedMeta>>(
-    () => new Map(),
-  );
 
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [dest, setDest] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
-
-  const [linksBusy, setLinksBusy] = useState(false);
-  const [linksError, setLinksError] = useState<string | null>(null);
-  const [exportPayload, setExportPayload] = useState<ExportPayload | null>(null);
 
   const errorId = useId();
   const genRef = useRef(0);
@@ -115,7 +88,6 @@ export function Parse() {
       setFiles(r.files);
       setStack([]);
       setChecked(new Set());
-      setCheckedMeta(new Map());
       setFilesError(null);
     } catch (err) {
       setParseError(
@@ -170,34 +142,12 @@ export function Parse() {
     }
   }
 
-  /** 当前目录相对前缀（面包屑推导；根=''）。 */
-  function currentPrefix(): string {
-    return stack.map((c) => c.name).join('/');
-  }
-
-  /** 勾选来源相对路径（W2）：根=file_name，子目录=面包屑相对路径/file_name。 */
-  function entryPath(name: string): string {
-    const prefix = currentPrefix();
-    return prefix ? `${prefix}/${name}` : name;
-  }
-
   function toggle(fid: string, next: boolean): void {
     setChecked((prev) => {
       const set = new Set(prev);
       if (next) set.add(fid);
       else set.delete(fid);
       return set;
-    });
-    // 勾选时记录来源条目（dir + 相对路径）；条目必在当前列表（行级勾选）
-    const entry = files.find((f) => f.fid === fid);
-    setCheckedMeta((prev) => {
-      const map = new Map(prev);
-      if (next && entry) {
-        map.set(fid, { dir: entry.dir, path: entryPath(entry.file_name) });
-      } else {
-        map.delete(fid);
-      }
-      return map;
     });
   }
 
@@ -210,14 +160,6 @@ export function Parse() {
         else set.delete(f.fid);
       }
       return set;
-    });
-    setCheckedMeta((prev) => {
-      const map = new Map(prev);
-      for (const f of files) {
-        if (next) map.set(f.fid, { dir: f.dir, path: entryPath(f.file_name) });
-        else map.delete(f.fid);
-      }
-      return map;
     });
   }
 
@@ -250,60 +192,6 @@ export function Parse() {
       setSubmitting(false);
     }
   }
-
-  /**
-   * 生成直链（fix round 1 W1/W2）：
-   * - W1：目录项不上送（后端对目录 fid 无处理必报错），过滤发生时
-   *   toast「已忽略 N 个目录」；过滤后为空时按钮已禁用（此处防御返回）。
-   * - W2：links 响应条目无 fid 字段，以 file_name 与勾选路径上下文对位
-   *   （同名按勾选序消耗），组装各条目层级 rel_path；对位不上的条目
-   *   回退 file_name 平铺。
-   */
-  async function makeLinks(): Promise<void> {
-    if (!result) return;
-    const fileFids = [...checked].filter(
-      (fid) => checkedMeta.get(fid)?.dir !== true,
-    );
-    if (fileFids.length === 0) return;
-    if (fileFids.length < checked.size) {
-      toast.show(`已忽略 ${checked.size - fileFids.length} 个目录`, 'info');
-    }
-    setLinksBusy(true);
-    setLinksError(null);
-    try {
-      const r = await getShareLinks(result.sid, fileFids);
-      const pending = fileFids
-        .map((fid) => checkedMeta.get(fid))
-        .filter((m): m is CheckedMeta => m !== undefined);
-      const used = pending.map(() => false);
-      setExportPayload({
-        expiresHint: r.expires_hint,
-        items: r.items.map((it) => {
-          let relPath = it.file_name;
-          for (let i = 0; i < pending.length; i += 1) {
-            const p = pending[i].path;
-            if (!used[i] && p.slice(p.lastIndexOf('/') + 1) === it.file_name) {
-              relPath = p;
-              used[i] = true;
-              break;
-            }
-          }
-          return { rel_path: relPath, url: it.url };
-        }),
-      });
-    } catch (err) {
-      setLinksError(
-        err instanceof ApiError ? err.message : '取直链失败，请稍后重试',
-      );
-    } finally {
-      setLinksBusy(false);
-    }
-  }
-
-  // W1：参与直链的勾选项数（剔除目录）——为 0 时「生成直链」禁用
-  const linkableCount = [...checked].filter(
-    (fid) => checkedMeta.get(fid)?.dir !== true,
-  ).length;
 
   return (
     <section className="parse">
@@ -410,20 +298,7 @@ export function Parse() {
             >
               下载选中
             </Button>
-            <Button
-              variant="secondary"
-              disabled={linkableCount === 0}
-              loading={linksBusy}
-              onClick={() => void makeLinks()}
-            >
-              生成直链
-            </Button>
           </div>
-          {linksError && (
-            <p className="parse__error" role="alert">
-              {linksError}
-            </p>
-          )}
         </>
       )}
 
@@ -458,15 +333,6 @@ export function Parse() {
           </div>
         </form>
       </Dialog>
-
-      {exportPayload && (
-        <ExportDialog
-          open
-          onClose={() => setExportPayload(null)}
-          items={exportPayload.items}
-          expiresHint={exportPayload.expiresHint}
-        />
-      )}
     </section>
   );
 }
