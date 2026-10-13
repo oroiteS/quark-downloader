@@ -58,8 +58,9 @@ func (a *App) restoreTasks(ctx context.Context) error {
 		// （.qmeta）**才标「已存在」终态——模式 A 预分配（worker.go
 		// preallocate：开局即 Truncate 到 total），仅凭 size 相符会把
 		// 自己的断点文件误判完整（断点永不续传）。有 .qmeta 一律交
-		// 引擎对账：部分断点续传、已完成秒完成（brief 逐字「引擎对账
-		// 天然处理」）。size≤0 判定不可信，同样交引擎。
+		// 引擎对账（部分断点续传）；任务成功终态引擎已删除 .qmeta
+		// （runA 成功分支 removeDoneQMeta），故完整任务在此直接命中
+		// 「已存在」，无需重跑对账。size≤0 判定不可信，同样交引擎。
 		if tc.Size > 0 {
 			if _, qerr := os.Stat(tc.Dest + ".qmeta"); qerr != nil {
 				if st, err := os.Stat(tc.Dest); err == nil && !st.IsDir() && st.Size() == tc.Size {

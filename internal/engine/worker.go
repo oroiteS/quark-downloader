@@ -30,7 +30,9 @@ import (
 
 // runA 装配并运行模式 A 主循环（§3.5 模式 A）。ctx 是任务级生命周期：
 // 取消即全体退出（错误=ctx.Err()、终态=canceled）。W 为恢复对账后的
-// 记账起点（全新任务全零），完成后 W 全满且 .qmeta 留有完成凭证。
+// 记账起点（全新任务全零），完成后 W 全满；.qmeta 断点凭证随成功终态
+// 删除（成功即删：目录只留完整交付文件，恢复链凭「Dest 完整+无 .qmeta」
+// 判已存在），失败/取消/暂停路径保留供续传。
 // 收尾顺序（§3.11 先于 §3.10）：完整性终判 → finalizeCleanup——cancelled
 // 或 errors 非空但数据完整（done ≥ total）按成功处理，绝不删完整文件；
 // 失败/取消走 finalizeCleanup（Range 不支持转单线程、4xx 零进度两组净头
@@ -88,8 +90,9 @@ func (t *Task) runA(ctx context.Context) error {
 	cancel()
 	monWG.Wait()
 
-	// 终态落盘一次 .qmeta：成功 = W 全满的完成凭证；失败/取消 = 断点。
-	// best-effort——元数据丢失只是丢续传不丢数据，不覆盖 firstErr。
+	// 终态落盘一次 .qmeta：失败/取消 = 断点（成功终态由下方成功分支随即
+	// 删除，见 removeDoneQMeta）。best-effort——元数据丢失只是丢续传不丢
+	// 数据，不覆盖 firstErr。
 	_ = t.saveMeta()
 
 	t.errMu.Lock()
@@ -122,6 +125,12 @@ func (t *Task) runA(ctx context.Context) error {
 
 	switch {
 	case err == nil:
+		// 成功终态删除 .qmeta 续传元数据（用户实测残留 → 裁决：成功即删，
+		// 目录干净交付）。恢复链（webapi restoreTasks 的 G11 判据）见
+		// 「Dest 完整且无 .qmeta」直接标已存在，行为等价、无需联动改动。
+		// best-effort：删除失败仅日志，不掩盖成功（残留只是已完成任务的
+		// 冗余记录，交引擎对账仍秒完成，无害）。
+		t.removeDoneQMeta()
 		t.state.Store(int32(stateDone))
 	case isCancellation(err):
 		t.state.Store(int32(stateCanceled))
@@ -463,7 +472,8 @@ func fallbackHeaders() []http.Header {
 
 // runSingle 单线程全量下载（§3.10：Range 不支持转单线程 / 4xx 零进度
 // 兜底共用）：不带 Range、期望 200，从 0 写满 total（O_TRUNC 重写）；
-// 成功后 W 全满并落 .qmeta 完成凭证（§3.6）。
+// 成功后 W 全满并落 .qmeta（§3.6；成功终态由 runA 成功分支的
+// removeDoneQMeta 随即删除——这里落盘只为兜底链路的断点语义口径统一）。
 func (t *Task) runSingle(ctx context.Context, headers http.Header) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.URL, nil)
 	if err != nil {
@@ -500,7 +510,7 @@ func (t *Task) runSingle(ctx context.Context, headers http.Header) error {
 	}
 	t.wmu.Unlock()
 	t.done.Store(t.Total)
-	return t.saveMeta() // 完成凭证（best-effort 由调用方口径覆盖）
+	return t.saveMeta() // 断点存档（成功终态随即删除，见 removeDoneQMeta）
 }
 
 // removePartial 删除半成品（§3.10 表「删除」动作）：dest + .qmeta +
@@ -517,6 +527,19 @@ func (t *Task) removePartial() error {
 		}
 	}
 	return nil
+}
+
+// removeDoneQMeta 成功终态清理 .qmeta（成功即删：目录只留完整交付文件；
+// runA 成功分支统一收口——正常成功、完整性终判翻转、Range 不支持转单
+// 线程与 4xx 兜底成功都汇入 err==nil 分支）。失败/取消/暂停的断点保留
+// 语义在 finalizeCleanup/Manager，不经此函数。best-effort 对齐
+// removePartial 的容错风格：NotExist 视为成功（本就无元数据可删），其余
+// 错误仅日志——删除失败不影响任务成功，残留文件交引擎对账仍秒完成。
+func (t *Task) removeDoneQMeta() {
+	if err := os.Remove(t.qmetaPath()); err != nil && !os.IsNotExist(err) {
+		slog.Warn("feiwu: 成功后清理 .qmeta 失败（不影响任务成功）",
+			"task", t.ID, "qmeta", t.qmetaPath(), "err", err)
+	}
 }
 
 // zeroProgress 磁盘上是否毫无进度（§3.10 兜底判据「.qmeta 全零」）：

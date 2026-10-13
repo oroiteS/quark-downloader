@@ -100,7 +100,8 @@ func newFastTask(t *testing.T, dest, url string, threads int, total int64) *Task
 // ---- 四个核心用例 -----------------------------------------------------------
 
 // 小文件全流程：8MB/8 线程（Plan → 16 片，Ruling E2：片数直接调 Plan，
-// 勿手算）→ 完成后逐字节比对源文件；.qmeta 存在且 W 全满；每片恰一个请求。
+// 勿手算）→ 完成后逐字节比对源文件；成功终态删除 .qmeta（成功即删，目录
+// 只留完整交付文件）；每片恰一个请求。
 func TestRunASmall(t *testing.T) {
 	total := int64(8 << 20) // 8MB：bySize(<32MB)=4、eff=8 → want=256 → seg=512KB → 16 片
 	data := testPattern(total)
@@ -127,14 +128,10 @@ func TestRunASmall(t *testing.T) {
 		t.Errorf("目标文件与源不一致（len got=%d want=%d）", len(got), len(data))
 	}
 
-	m, err := LoadQMeta(dest + ".qmeta")
-	if err != nil {
-		t.Fatalf("完成后 .qmeta 应存在且合法: %v", err)
-	}
-	for i, s := range tk.Segs {
-		if want := s.End - s.Start + 1; m.W[i] != want {
-			t.Errorf("W[%d] = %d, want %d（完成后应全满）", i, m.W[i], want)
-		}
+	// 成功终态删除 .qmeta（成功即删：目录只留完整交付文件；失败/取消
+	// 才保留断点，见 TestRunAResume / TestFinalizeCleanup）。
+	if _, qerr := os.Stat(dest + ".qmeta"); !os.IsNotExist(qerr) {
+		t.Errorf("成功后 .qmeta 应删除, stat err = %v", qerr)
 	}
 
 	if p := tk.progress(); p.Done != total || p.State != "done" {
@@ -692,12 +689,10 @@ func TestRunARangeUnsupportedFallback(t *testing.T) {
 	if rerr != nil || !bytes.Equal(got, data) {
 		t.Errorf("转单线程后文件应完整 (%v)", rerr)
 	}
-	m, lerr := LoadQMeta(dest + ".qmeta")
-	if lerr != nil {
-		t.Fatalf(".qmeta 应存在: %v", lerr)
-	}
-	if m.W[0] != total {
-		t.Errorf(".qmeta W[0] = %d, want %d（全满完成凭证）", m.W[0], total)
+	// 兜底成功同为成功终态（汇入 runA 的 err==nil 分支）：.qmeta 随成功
+	// 删除（目录干净）。
+	if _, merr := os.Stat(dest + ".qmeta"); !os.IsNotExist(merr) {
+		t.Errorf("兜底成功后 .qmeta 应删除, stat err = %v", merr)
 	}
 	mu.Lock()
 	defer mu.Unlock()

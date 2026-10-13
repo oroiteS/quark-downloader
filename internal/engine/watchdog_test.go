@@ -197,14 +197,10 @@ func TestRunACancelAtCompleteMoment(t *testing.T) {
 	if !bytes.Equal(got, data) {
 		t.Error("文件内容应完整")
 	}
-	m, err := LoadQMeta(tk.qmetaPath())
-	if err != nil {
-		t.Fatalf("完成凭证 .qmeta 应保留: %v", err)
-	}
-	for i, w := range m.W {
-		if w != tk.Segs[i].End-tk.Segs[i].Start+1 {
-			t.Fatalf("片 %d W=%d 未全满", i, w)
-		}
+	// 翻转成功同为成功终态（汇入 runA 的 err==nil 分支）：.qmeta 随成功
+	// 删除（成功即删，目录干净）。
+	if _, qerr := os.Stat(tk.qmetaPath()); !os.IsNotExist(qerr) {
+		t.Errorf("成功后 .qmeta 应删除, stat err = %v", qerr)
 	}
 }
 
@@ -236,6 +232,10 @@ func TestRunAFailAfterCompleteKeepsFile(t *testing.T) {
 	got, rerr := os.ReadFile(dest)
 	if rerr != nil || !bytes.Equal(got, data) {
 		t.Errorf("完整文件应保留且内容一致 (%v)", rerr)
+	}
+	// 翻转成功同样删除 .qmeta（成功终态统一收口于 runA 成功分支）。
+	if _, qerr := os.Stat(tk.qmetaPath()); !os.IsNotExist(qerr) {
+		t.Errorf("成功后 .qmeta 应删除, stat err = %v", qerr)
 	}
 }
 

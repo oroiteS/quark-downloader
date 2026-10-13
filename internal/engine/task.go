@@ -188,6 +188,8 @@ func (t *Task) progress() Progress {
 func (t *Task) qmetaPath() string { return t.Dest + ".qmeta" }
 
 // saveMeta 全量快照 W 并原子落盘 .qmeta（§3.6 写入协议由 SaveQMeta 保证）。
+// 用途：监视线程周期存档与终态断点（失败/取消/暂停保留供续传）；成功
+// 终态由 removeDoneQMeta（worker.go）随即删除——成功不留元数据。
 func (t *Task) saveMeta() error {
 	t.wmu.Lock()
 	w := make([]int64, len(t.W))
