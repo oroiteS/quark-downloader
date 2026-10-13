@@ -21,6 +21,8 @@ go build -o feiwu ./cmd/feiwu
 ./feiwu
 ```
 
+设置页的「选择目录…」按钮走 `POST /api/fs/pick-dir`：由后端调系统原生目录选择对话框（macOS 访达 / Windows FolderBrowserDialog / Linux zenity）返回绝对路径，未支持平台或对话框命令缺失返回 503 `fs_picker_unsupported`。
+
 运行时环境变量（均可选）：
 
 - `FEIWU_PORT`：监听端口，缺省 `127.0.0.1` 随机端口（实际地址打印在启动日志）。

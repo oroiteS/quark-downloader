@@ -1,7 +1,8 @@
 // wire 契约类型（Task 3）：与后端实测形态逐字对齐。
 //
 // 权威来源（禁从文档抄，以代码为准）：
-// - 错误码 29 项冻结：internal/webapi/server.go:253-283 常量块
+// - 错误码 31 项冻结：internal/webapi/server.go 常量块（Task 13 后增
+//   fs_picker_unsupported/dialog_busy——计划外 Task 11 目录选择器）
 // - SSE 帧型：internal/webapi/events.go:21 Event{type, taskId?, payload?}
 //   （json tag 为驼峰 taskId——plan 文档 Global Constraints 的 task_id 是笔误）
 // - taskDTO：internal/webapi/tasks.go:500-512
@@ -11,7 +12,7 @@
 
 // ---- 错误面 ----
 
-/** 29 项冻结错误码（server.go 常量块逐字；增删须同步后端护栏测试）。 */
+/** 31 项冻结错误码（server.go 常量块逐字；增删须同步后端护栏测试）。 */
 export type ErrorCode =
   | 'not_logged_in'
   | 'internal'
@@ -41,7 +42,9 @@ export type ErrorCode =
   | 'no_share_session'
   | 'invalid_links_request'
   | 'invalid_settings'
-  | 'save_settings_failed';
+  | 'save_settings_failed'
+  | 'fs_picker_unsupported'
+  | 'dialog_busy';
 
 /** 后端错误响应统一形态：{error:{code,message}}。 */
 export interface ApiErrorBody {
@@ -78,6 +81,8 @@ const FROZEN_ERROR_CODES: readonly ErrorCode[] = [
   'invalid_links_request',
   'invalid_settings',
   'save_settings_failed',
+  'fs_picker_unsupported',
+  'dialog_busy',
 ];
 
 /** 运行时守卫：未知 code（契约违规）不进类型面，调用方兜底 internal。 */
@@ -88,7 +93,7 @@ export function isErrorCode(v: unknown): v is ErrorCode {
   );
 }
 
-/** 类型化 API 错误：code 收窄为 29 字面量联合，status 保留 HTTP 语义。 */
+/** 类型化 API 错误：code 收窄为 31 字面量联合，status 保留 HTTP 语义。 */
 export class ApiError extends Error {
   readonly code: ErrorCode;
   readonly status: number;
@@ -151,6 +156,17 @@ export interface Settings {
   threads: number;
   maxConcurrentTasks: number;
   themeLock: '' | 'light' | 'dark';
+}
+
+/**
+ * 目录选择结果（fsdialog.go handlePickDir 响应；POST /api/fs/pick-dir）。
+ * picked=true 时 path 为系统对话框返回的绝对路径；picked=false = 用户取消
+ * （前端静默）。失败不走此型——409 dialog_busy / 503 fs_picker_unsupported
+ * 等以 ApiError 抛出。
+ */
+export interface PickDirResult {
+  picked: boolean;
+  path?: string;
 }
 
 /** 网盘容量（auth.go account 端点 capacity 字段）。 */

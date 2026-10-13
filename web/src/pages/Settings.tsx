@@ -28,6 +28,7 @@ import { useNavigate } from 'react-router-dom';
 import { Button, Card, Dialog, Input, Spinner, toast } from '../components/ui';
 import { api } from '../api/client';
 import { ApiError } from '../api/types';
+import type { PickDirResult } from '../api/types';
 import { applyTheme } from '../theme';
 import type { ThemeLock } from '../theme';
 import { useSession } from '../stores/session';
@@ -63,6 +64,9 @@ export function Settings() {
   const [themeLock, setThemeLock] = useState<ThemeLock>('');
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // 目录选择器（计划外 Task 11）：请求期间按钮 loading（Button 的
+  // disabled||loading 同源防竞态点击）；回填不自动保存。
+  const [picking, setPicking] = useState(false);
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
   // 跟随分支的 matchMedia 监听卸载函数（D7）：切换前清旧、卸载兜底清。
@@ -127,6 +131,25 @@ export function Settings() {
     }
   }
 
+  // 目录选择器（计划外 Task 11）：后端调系统对话框（访达/资源管理器），
+  // picked:true 回填 destDir 输入框——**不自动保存**，仍走整表单保存语义
+  // （Review Focus #2）；picked:false（用户取消）静默；错误（409
+  // dialog_busy / 503 fs_picker_unsupported / 网络层）toast 后端 message。
+  async function handlePickDir(): Promise<void> {
+    setPicking(true);
+    try {
+      const r = await api.post<PickDirResult>('/api/fs/pick-dir');
+      if (r.picked && r.path) setDestDir(r.path);
+    } catch (e) {
+      toast.show(
+        e instanceof ApiError ? e.message : '选择目录失败，请稍后重试',
+        'error',
+      );
+    } finally {
+      setPicking(false);
+    }
+  }
+
   async function handleLogout(): Promise<void> {
     setLogoutBusy(true);
     try {
@@ -183,6 +206,23 @@ export function Settings() {
               onChange={(e) => setDestDir(e.target.value)}
               aria-invalid={saveError !== null && destDir === ''}
             />
+
+            {/* 系统目录选择器（计划外 Task 11）：与 Input 共存——按钮只回填
+                不替代手输；type="button" 不触发表单提交；loading 复用 T9 后
+                的 Button（可及名不因加载暂失）。settings.css 在本次边界外，
+                按钮以独立网格行紧邻 Input（同行并排需另授权改样式）。 */}
+            <div>
+              <Button
+                type="button"
+                variant="secondary"
+                loading={picking}
+                onClick={() => {
+                  void handlePickDir();
+                }}
+              >
+                选择目录…
+              </Button>
+            </div>
 
             <div className="settings__field">
               <label className="settings__label" htmlFor="settings-threads">

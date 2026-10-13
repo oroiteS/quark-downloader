@@ -157,6 +157,10 @@ func (a *App) buildRouter() *gin.Engine {
 	api.GET("/settings", a.handleSettingsGet)
 	api.PUT("/settings", a.handleSettingsPut)
 
+	// 系统原生目录选择器（计划外 Task 11，fsdialog.go：后端调系统对话框
+	// 返回绝对路径，设置页 destDir 回填；同刻仅一个对话框，busy→409）。
+	api.POST("/fs/pick-dir", a.handlePickDir)
+
 	registerStatic(r)
 	r.NoRoute(func(c *gin.Context) {
 		// /api（含 /api/ 前缀子路径）的未匹配路径保持 JSON 语义（客户端
@@ -280,4 +284,7 @@ const (
 	codeInvalidLinksReq    = "invalid_links_request" // 400 直链/导出请求参数错误
 	codeInvalidSettings    = "invalid_settings"      // 400 设置值非法（theme/档位/目录）
 	codeSaveSettingsFailed = "save_settings_failed"  // 500 settings.json 落盘失败
+	// 计划外 Task 11 增码（31 项冻结）：系统目录选择器端点错误面。
+	codeFsPickerUnsupported = "fs_picker_unsupported" // 503 平台不支持/对话框命令缺失
+	codeDialogBusy          = "dialog_busy"           // 409 已有目录选择对话框打开
 )

@@ -591,13 +591,16 @@ func TestErrorCodeConstantsFrozen(t *testing.T) {
 		"invalid_links_request": codeInvalidLinksReq,
 		"invalid_settings":      codeInvalidSettings,
 		"save_settings_failed":  codeSaveSettingsFailed,
+		// 计划外 Task 11 增码（31 项冻结）：系统目录选择器端点错误面。
+		"fs_picker_unsupported": codeFsPickerUnsupported,
+		"dialog_busy":           codeDialogBusy,
 	}
 	for wire, constant := range frozen {
 		if wire != constant {
 			t.Errorf("错误码常量漂移: wire=%q 常量=%q（重命名须同步系列 4 前端）", wire, constant)
 		}
 	}
-	if len(frozen) != 29 {
-		t.Fatalf("冻结表条目 = %d, 期望 29（增删须过契约评审）", len(frozen))
+	if len(frozen) != 31 {
+		t.Fatalf("冻结表条目 = %d, 期望 31（增删须过契约评审）", len(frozen))
 	}
 }

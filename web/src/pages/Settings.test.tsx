@@ -260,3 +260,71 @@ describe('设置页：退出登录（场景 4）', () => {
     expect(screen.queryByText('登录页占位')).not.toBeInTheDocument();
   });
 });
+
+describe('设置页：选择目录（计划外 Task 11，系统原生目录选择器）', () => {
+  it('成功分支：POST /api/fs/pick-dir → picked:true → 回填 destDir 输入框，不自动保存（无 PUT、无 toast）', async () => {
+    await renderLoaded();
+    vi.mocked(api.post).mockResolvedValue({
+      picked: true,
+      path: '/Users/x/Movies/feiwu',
+    } as never);
+
+    fireEvent.click(screen.getByRole('button', { name: '选择目录…' }));
+    await flush();
+
+    expect(vi.mocked(api.post)).toHaveBeenCalledWith('/api/fs/pick-dir');
+    expect(screen.getByLabelText('下载目录')).toHaveValue(
+      '/Users/x/Movies/feiwu',
+    );
+    // 不自动保存：仍走整表单保存语义（Review Focus #2）
+    expect(vi.mocked(api.put)).not.toHaveBeenCalled();
+    expect(toastShow).not.toHaveBeenCalled();
+  });
+
+  it('取消分支：picked:false → 静默（输入框原值、无 toast）', async () => {
+    await renderLoaded();
+    vi.mocked(api.post).mockResolvedValue({ picked: false } as never);
+
+    fireEvent.click(screen.getByRole('button', { name: '选择目录…' }));
+    await flush();
+
+    expect(screen.getByLabelText('下载目录')).toHaveValue('/tmp/dl');
+    expect(toastShow).not.toHaveBeenCalled();
+  });
+
+  it('错误分支（dialog_busy 409）：toast error 后端 message，输入框原值', async () => {
+    await renderLoaded();
+    vi.mocked(api.post).mockRejectedValue(
+      new ApiError('dialog_busy', '已有目录选择对话框打开，请先完成或取消', 409),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '选择目录…' }));
+    await flush();
+
+    expect(toastShow).toHaveBeenCalledWith(
+      '已有目录选择对话框打开，请先完成或取消',
+      'error',
+    );
+    expect(screen.getByLabelText('下载目录')).toHaveValue('/tmp/dl');
+  });
+
+  it('请求期间按钮 loading：disabled + aria-busy，可及名不因加载暂失（T9）', async () => {
+    await renderLoaded();
+    let resolvePick!: (value: unknown) => void;
+    vi.mocked(api.post).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePick = resolve;
+        }),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '选择目录…' }));
+    const pickBtn = screen.getByRole('button', { name: '选择目录…' });
+    expect(pickBtn).toBeDisabled();
+    expect(pickBtn).toHaveAttribute('aria-busy', 'true');
+
+    resolvePick({ picked: false });
+    await flush();
+    expect(screen.getByRole('button', { name: '选择目录…' })).toBeEnabled();
+  });
+});
