@@ -8,8 +8,9 @@
  *
  * probeAccount：启动探测（main.tsx 编排：先探测后 connectEvents）。探测实现
  * 落在本文件而非 main.tsx 内联——main.tsx 带 createRoot 副作用不可被测试导入；
- * 401/网络错误一律 loggedIn=false（auth.go:342 未登录即 401 not_logged_in）。
- * 空昵称半登录态（真机复验三轮）同样按未登录处理，见 probeAccount 内注释。
+ * 401/网络错误一律 loggedIn=false（auth.go 未登录即 401 not_logged_in）。
+ * 登录态与昵称解耦（T15，校验保守原则）：200 且 logged_in:true 一律视为已
+ * 登录，空昵称由 AccountBadge「夸克用户」占位兜底，见 probeAccount 内注释。
  *
  * 页面本体按 Task 接管：/login 已由 pages/Login（Task 5）挂载；/（解析）
  * 已由 pages/Parse（Task 6，控制者预授权接线）挂载；/tasks 已由
@@ -36,13 +37,14 @@ import './app.css';
 export async function probeAccount(): Promise<void> {
   try {
     const account = await api.get<Account>('/api/account');
-    // 空昵称半登录态防御（真机复验三轮，控制者裁决）：后端 auth.go:344-382
-    // 存在边缘路径——QuickCheck wall 失败但 probeFileSort 兜底成功且进程内
-    // cachedAccount 为空 → 返回 200 {logged_in:true, nickname:"", avatar:"",
-    // capacity:{真值}}。该态对用户就是未登录体验（昵称空 → AccountBadge
-    // 显示「未登录」却放行内页），与 401 同路置 loggedIn=false，不写昵称/
-    // 容量，强制重扫码。
-    if (account.logged_in && account.nickname !== '') {
+    // 登录态与昵称解耦（T15，校验保守原则，真机实锤）：200 且 logged_in:true
+    // 即凭据有效——后端回退链（进程内 cachedAccount → account.json）仍拿不到
+    // 昵称时返回 200 {logged_in:true, nickname:"", capacity:{真值}}，这是
+    // 「昵称拿不到」而非「登录失效」。撤销上轮「空昵称=未登录」防御（e538df7，
+    // 真机复验证实其把有效会话误踢登录页）：空昵称照常 setAccount（容量照常
+    // 写入），AccountBadge 以「夸克用户」占位兜底。登录失效只由 401/网络错误
+    // 与 SSE expired 帧表达。
+    if (account.logged_in) {
       useSession.getState().setAccount({
         nickname: account.nickname,
         avatar: account.avatar,

@@ -1,7 +1,7 @@
 // App 壳/路由/登录守卫行为钉死（简报 Step 1）：
 // - 三态守卫：null=全屏 Spinner 不跳转 / false=重定向 /login / true=放行
-// - 空昵称半登录态（真机复验三轮）：200 {logged_in:true, nickname:""} 按未
-//   登录处理，昵称/容量不写入（auth.go 边缘路径，见 probeAccount 注释）
+// - 登录态与昵称解耦（T15，校验保守原则）：200 {logged_in:true, nickname:""}
+//   仍视为已登录，昵称/容量照常写入，AccountBadge「夸克用户」占位兜底
 // - D2 导航四项 + 当前项 aria-current="page"（NavLink 内建语义）
 // - AccountBadge 容量换算（wire 为字节 → 1024 基准 GiB 显示）与容量环弧度=used/total
 // - 会话过期（logoutReset 置 false）→ 自动跳 /login 且不循环（location 只变一次）
@@ -98,11 +98,12 @@ describe('App 登录守卫（三态）', () => {
     expect(useSession.getState().loggedIn).toBe(false);
   });
 
-  // 空昵称半登录态（真机复验三轮，控制者裁决）：后端 auth.go:344-382 边缘
-  // 路径——QuickCheck wall 失败但 probeFileSort 兜底成功 → 200
-  // {logged_in:true, nickname:"", capacity:{真值}}。按未登录处理：不写昵称/
-  // 容量（容量真值也不得写入，否则守卫放行 + AccountBadge「未登录」并存）。
-  it('探测 200 但昵称为空（半登录态边缘路径）：loggedIn=false 且昵称/容量不写入', async () => {
+  // 空昵称=有效登录态（T15 解耦，校验保守原则，真机实锤）：后端回退链
+  // （进程内 cachedAccount → account.json）也拿不到昵称时返回 200
+  // {logged_in:true, nickname:"", capacity:{真值}}——凭据有效仅昵称拿不到。
+  // 一律 setAccount（昵称空、容量照常写入），放行内页；AccountBadge 以
+  // 「夸克用户」占位，「未登录」字样不出现。撤销上轮 e538df7 的误踢。
+  it('探测 200 但昵称为空（回退链零值）：loggedIn=true、容量写入、AccountBadge 占位「夸克用户」', async () => {
     mockAccount({
       logged_in: true,
       nickname: '',
@@ -110,9 +111,22 @@ describe('App 登录守卫（三态）', () => {
       capacity: { total: 24 * GIB, used: 20 * GIB }, // 真机截图：容量 24/20G 真值
     });
     await probeAccount();
-    expect(useSession.getState().loggedIn).toBe(false);
+    expect(useSession.getState().loggedIn).toBe(true);
     expect(useSession.getState().nickname).toBe('');
-    expect(useSession.getState().capacity).toBeNull();
+    expect(useSession.getState().capacity).toEqual({
+      total: 24 * GIB,
+      used: 20 * GIB,
+    });
+
+    renderAppAt('/tasks');
+    expect(screen.getByText('夸克用户')).toBeInTheDocument();
+    expect(screen.queryByText('未登录')).not.toBeInTheDocument();
+
+    // 头像占位圈：空昵称取占位名首字符「夸」
+    const fallback = document.querySelector(
+      '.account-badge__avatar--fallback',
+    );
+    expect(fallback).toHaveTextContent('夸');
   });
 });
 

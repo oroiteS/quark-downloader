@@ -13,6 +13,9 @@
  * - 头像（T10 真机验收③）：avatar 有值→32px 圆形 img；无值或加载失败→
  *   昵称首字符占位圈。img alt=""（装饰——昵称已承载语义，skill：装饰性
  *   图不进无障碍树）；占位圈同理 aria-hidden。
+ * - 昵称占位（T15 登录态与昵称解耦）：登录态下后端回退链也拿不到昵称时
+ *   （200 {logged_in:true, nickname:""}）显示「夸克用户」占位——「未登录」
+ *   字样仅 loggedIn=false 出现，昵称空不再暗示未登录。
  * - 环为装饰（数值已由文本承载）→ aria-hidden，避免读屏双重播报（skill：
  *   装饰性 SVG 不进无障碍树）。
  */
@@ -28,10 +31,15 @@ function toGiB(bytes: number): number {
 }
 
 export function AccountBadge() {
+  const loggedIn = useSession((s) => s.loggedIn);
   const nickname = useSession((s) => s.nickname);
   const avatar = useSession((s) => s.avatar);
   const capacity = useSession((s) => s.capacity);
   const [imgFailed, setImgFailed] = useState(false);
+
+  // 昵称占位（T15）：空昵称按登录态分流——已登录「夸克用户」、未登录（含
+  // 探测中 loggedIn=null，壳层尚不渲染本组件，纯防御）保持「未登录」。
+  const displayName = nickname || (loggedIn ? '夸克用户' : '未登录');
 
   // avatar 更新（重新登录/换号）时重置失败态，允许新图重试
   useEffect(() => {
@@ -71,7 +79,7 @@ export function AccountBadge() {
           className="account-badge__avatar account-badge__avatar--fallback"
           aria-hidden="true"
         >
-          {(nickname || '未登录').trim().charAt(0)}
+          {displayName.trim().charAt(0)}
         </span>
       )}
       <svg
@@ -106,7 +114,7 @@ export function AccountBadge() {
         />
       </svg>
       <div className="account-badge__meta">
-        <span className="account-badge__name">{nickname || '未登录'}</span>
+        <span className="account-badge__name">{displayName}</span>
         {capacity && (
           <span className="account-badge__capacity">
             {toGiB(used)}/{toGiB(total)}G
