@@ -1,5 +1,5 @@
 // API 客户端契约（Task 3，TDD 先行）：apiFetch 非 2xx → 解析 {error:{code,message}}
-// 抛 ApiError（code 收窄为 29 冻结错误码联合）；非 JSON 错误体 → code='internal'。
+// 抛 ApiError（code 收窄为 31 冻结错误码联合）；非 JSON 错误体 → code='internal'。
 // 错误码权威 = internal/webapi/server.go:253-283 常量块（禁从文档抄）。
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api, apiFetch } from './client';
@@ -57,7 +57,7 @@ describe('apiFetch（2xx 直通与错误面）', () => {
     const err = await apiFetch('/api/settings').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     const apiErr = err as ApiError;
-    // code 类型为 ErrorCode（29 字面量联合）——invalid_settings 是其一员
+    // code 类型为 ErrorCode（31 字面量联合）——invalid_settings 是其一员
     expect(apiErr.code).toBe('invalid_settings');
     expect(apiErr.status).toBe(400);
     expect(apiErr.message).toBe('destDir 不可为空');
@@ -71,7 +71,7 @@ describe('apiFetch（2xx 直通与错误面）', () => {
     expect((err as ApiError).status).toBe(502);
   });
 
-  it('错误体是 JSON 但 code 不在 29 冻结集合 → 兜底 internal（契约违规不崩溃）', async () => {
+  it('错误体是 JSON 但 code 不在 31 冻结集合 → 兜底 internal（契约违规不崩溃）', async () => {
     makeFetch(() => jsonResponse(500, { error: { code: 'not_a_real_code' } }));
     const err = await apiFetch('/api/x').catch((e: unknown) => e);
     expect((err as ApiError).code).toBe('internal');

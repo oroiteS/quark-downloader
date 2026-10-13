@@ -151,6 +151,27 @@ func TestParsePickResult(t *testing.T) {
 	}
 }
 
+// TestParsePickResultDarwinSlashNorm darwin 成功路径尾随斜杠归一：
+// `POSIX path of (choose folder)` 恒带尾随 "/"（如 /Users/x/DL/），归一后
+// 与手输目录展示形态一致（review fix round 1）；根 "/" 例外保留——归一
+// 到空串会丢根路径语义。
+func TestParsePickResultDarwinSlashNorm(t *testing.T) {
+	cases := []struct{ name, stdout, want string }{
+		{"目录带尾斜杠", "/Users/x/DL/\n", "/Users/x/DL"},
+		{"根路径保留", "/\n", "/"},
+		{"无尾斜杠原样", "/Users/x/DL\n", "/Users/x/DL"},
+	}
+	for _, tc := range cases {
+		picked, path, ferr := parsePickResult("darwin", dialogOutcome{stdout: tc.stdout})
+		if ferr != nil || !picked {
+			t.Fatalf("%s: 意外失败 picked=%v err=%v", tc.name, picked, ferr)
+		}
+		if path != tc.want {
+			t.Fatalf("%s: path = %q, 期望 %q", tc.name, path, tc.want)
+		}
+	}
+}
+
 // ---- handler 集成（路由真挂载，fake runner 注入） ----
 
 // newFsDialogTestApp 最小装配（pick-dir 不触 session/manager/settings，

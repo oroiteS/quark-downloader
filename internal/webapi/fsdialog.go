@@ -104,7 +104,9 @@ var runDialogCmd = func(cmd *exec.Cmd) dialogOutcome {
 // 任意平台上单测）：
 //
 //	darwin  非零退出且 stderr 含 "(-128)" 或 "User canceled" → 取消；
-//	        成功但 stdout 空 → 失败（不应发生，显式不吞）。
+//	        成功但 stdout 空 → 失败（不应发生，显式不吞）；成功路径
+//	        去尾随 "/"（POSIX path 恒带尾斜杠，归一为手输目录形态；
+//	        根 "/" 例外保留）。
 //	linux   退出码 1 → 取消；其余非零退出 → 失败。
 //	windows 退出 0 且 stdout 空 → 取消（脚本仅 OK 时输出）；非零 → 失败。
 func parsePickResult(goos string, o dialogOutcome) (picked bool, path string, ferr error) {
@@ -118,6 +120,9 @@ func parsePickResult(goos string, o dialogOutcome) (picked bool, path string, fe
 		}
 		if path == "" {
 			return false, "", errors.New("osascript 成功返回但无路径输出")
+		}
+		if path != "/" { // 根路径保留，其余去尾随斜杠（review fix round 1）
+			path = strings.TrimSuffix(path, "/")
 		}
 		return true, path, nil
 	case "linux":

@@ -84,7 +84,8 @@ func TestPanicRecoveryErrorShape(t *testing.T) {
 	}
 }
 
-// TestStaticRoot GET / → 200 text/html，内容为 embed 的占位 index.html。
+// TestStaticRoot GET / → 200 text/html，内容为 embed 的前端构建产物
+// index.html（断言 SPA 挂载点，不与构建 hash 字面耦合——重构建不红）。
 func TestStaticRoot(t *testing.T) {
 	app := New(Deps{})
 	w := httptest.NewRecorder()
@@ -96,8 +97,8 @@ func TestStaticRoot(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 		t.Fatalf("Content-Type = %q, 期望 text/html; charset=utf-8", ct)
 	}
-	if !bytes.Contains(w.Body.Bytes(), []byte("飞舞 feiwu")) {
-		t.Fatalf("响应体非占位 index.html: %q", w.Body.String())
+	if !bytes.Contains(w.Body.Bytes(), []byte(`<div id="root">`)) {
+		t.Fatalf("响应体缺 SPA 挂载点 <div id=\"root\">: %q", w.Body.String())
 	}
 }
 
@@ -112,8 +113,8 @@ func TestSPAFallback(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("/tasks/abc/detail 状态码 = %d, 期望 200（fallback）", w.Code)
 	}
-	if !bytes.Contains(w.Body.Bytes(), []byte("飞舞 feiwu")) {
-		t.Fatalf("/tasks/abc/detail 应回落 index.html, 得到 %q", w.Body.String())
+	if !bytes.Contains(w.Body.Bytes(), []byte(`<div id="root">`)) {
+		t.Fatalf("/tasks/abc/detail 应回落 index.html(缺挂载点), 得到 %q", w.Body.String())
 	}
 
 	// /api 前缀 → JSON 404，绝不回落 HTML。
@@ -129,7 +130,7 @@ func TestSPAFallback(t *testing.T) {
 	// /apifoo 是 /api 的字符串前缀但不是 API 命名空间 → 仍走 SPA fallback。
 	w3 := httptest.NewRecorder()
 	app.Router().ServeHTTP(w3, httptest.NewRequest(http.MethodGet, "/apifoo", nil))
-	if w3.Code != http.StatusOK || !bytes.Contains(w3.Body.Bytes(), []byte("飞舞 feiwu")) {
+	if w3.Code != http.StatusOK || !bytes.Contains(w3.Body.Bytes(), []byte(`<div id="root">`)) {
 		t.Fatalf("/apifoo 应回落 index.html, 得到 %d %q", w3.Code, w3.Body.String())
 	}
 }
