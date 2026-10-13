@@ -13,6 +13,12 @@
  *   error #EF5350 ≈ 5.0 ✓；success #66BB6A ≈ 7.3 ✓；warning #FFB74D > 7 ✓；
  *   info #64B5F6 ≈ 6 ✓
  * （on-primary 均与对应 primary 底色成对自查 ≥4.5:1）
+ *
+ * 容量环三级色（T10 真机复验二轮，环 aria-hidden 装饰——WCAG 非文本
+ * 图形 3:1 阈值即可，对 --color-surface 实算）：light warning #b36000
+ * 4.58:1 ✓、dark warning #FFB74D ≈10.1:1 ✓（error/primary 亦远超 3:1）。
+ * 分级语义：占用 <70% primary、70%（含）～90% warning、90%（含）以上
+ * error（可超 100%，比例钳 1）——选色在 AccountBadge。
  */
 
 /* ---------- light（默认）---------- */

@@ -128,7 +128,9 @@ describe('App D2 布局', () => {
     expect(fallback).toHaveTextContent('n');
     expect(document.querySelector('img.account-badge__avatar')).toBeNull();
 
-    // 容量环弧度 = used/total：offset 与 dasharray 同一周长推导
+    // 容量环弧度 = used/total：offset 与 dasharray 同一周长推导；
+    // 0.62 < 0.7 → 三级色第一档 primary（inline style 的 var() 字面值，
+    // jsdom 不做 CSS 变量求值——断言变量引用即钉住分级选色）
     const ring = document.querySelector(
       '.capacity-ring__value',
     ) as SVGCircleElement;
@@ -136,6 +138,41 @@ describe('App D2 布局', () => {
     const dasharray = Number(ring.getAttribute('stroke-dasharray'));
     const dashoffset = Number(ring.getAttribute('stroke-dashoffset'));
     expect((dasharray - dashoffset) / dasharray).toBeCloseTo(31 / 50);
+    expect(ring.style.stroke).toBe('var(--color-primary)');
+  });
+
+  // 容量环三级色（T10 真机复验二轮）：占用 <70% primary、70%（含）～90%
+  // warning、90%（含）以上 error（ratio 钳 1，可超 100% 满环红）。
+  it('容量环三级色：0.8→warning；超 100% 钳 1→error 且满环', async () => {
+    mockAccount({
+      ...LOGGED_IN_ACCOUNT,
+      capacity: { total: 50 * GIB, used: 40 * GIB }, // 0.8 → warning 档
+    });
+    await probeAccount();
+    renderAppAt('/tasks');
+
+    const ring = document.querySelector(
+      '.capacity-ring__value',
+    ) as SVGCircleElement;
+    expect(ring.style.stroke).toBe('var(--color-warning)');
+    expect((Number(ring.getAttribute('stroke-dasharray')) -
+      Number(ring.getAttribute('stroke-dashoffset'))) /
+      Number(ring.getAttribute('stroke-dasharray'))).toBeCloseTo(0.8);
+  });
+
+  it('容量环三级色：90%（含）以上 error（超 100% 时 ratio 钳 1 满环）', async () => {
+    mockAccount({
+      ...LOGGED_IN_ACCOUNT,
+      capacity: { total: 50 * GIB, used: 55 * GIB }, // 1.1 → 钳 1 → error
+    });
+    await probeAccount();
+    renderAppAt('/tasks');
+
+    const ring = document.querySelector(
+      '.capacity-ring__value',
+    ) as SVGCircleElement;
+    expect(ring.style.stroke).toBe('var(--color-error)');
+    expect(ring.getAttribute('stroke-dashoffset')).toBe('0');
   });
 
   it('avatar 有值：32px 圆形 img 渲染（alt="" 装饰，昵称承载语义）', async () => {

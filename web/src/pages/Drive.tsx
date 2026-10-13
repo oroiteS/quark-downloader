@@ -152,6 +152,9 @@ export function Drive() {
       setChecked(new Set());
       setDownloadOpen(false);
     } catch (err) {
+      // T10 真机复验二轮：非 ApiError（fetch 层 reject）时 console 留
+      // 原始错误现场（Toast 文案语义不变，简报钉死取后端 message）。
+      console.error('任务提交失败', err);
       // 简报钉死：错误（含 409 dest_busy）Toast 文案取后端 message
       toast.show(
         err instanceof ApiError ? err.message : '任务提交失败，请稍后重试',

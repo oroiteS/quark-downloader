@@ -384,6 +384,45 @@ describe('解析页：勾选下载', () => {
     expect(seen).toEqual(['/']);
   });
 
+  // T10 真机复验二轮：成功路径曾误报兜底文案（非 ApiError 的 fetch 层
+  // reject），console 必须留原始错误现场供真机复现定位。
+  it('非 ApiError 失败：console.error 留现场 + 兜底文案，不跳转', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await prepareChecked();
+    vi.mocked(api.post).mockRejectedValue(new TypeError('Failed to fetch'));
+    fireEvent.click(screen.getByRole('button', { name: '开始下载' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '任务提交失败，请稍后重试',
+    );
+    expect(errSpy).toHaveBeenCalledWith('任务提交失败', expect.any(TypeError));
+    expect(seen).toEqual(['/']);
+  });
+
+  // 防双击（对齐 Drive 页防重语义）：提交中按钮 disabled + aria-busy，
+  // 响应前不可再点（组件层 Button disabled||loading，页面级钉死用法）。
+  it('提交中禁止重复提交：按钮 disabled + aria-busy，响应前不可再点', async () => {
+    await prepareChecked();
+    let resolvePost!: (value: unknown) => void;
+    vi.mocked(api.post).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePost = resolve;
+        }),
+    );
+    // 点击前抓引用：Button loading 态 children 保留（Spinner aria-hidden
+    // 不占可及名），提交态断言沿用该元素引用
+    const submitBtn = screen.getByRole('button', { name: '开始下载' });
+    fireEvent.click(submitBtn);
+
+    expect(submitBtn).toBeDisabled();
+    expect(submitBtn).toHaveAttribute('aria-busy', 'true');
+
+    resolvePost({ task_ids: ['t-1'], skipped: [] });
+    await flush();
+    expect(screen.getByTestId('loc')).toHaveTextContent('/tasks');
+  });
+
   it('Dialog 取消：关闭对话框不请求', async () => {
     await prepareChecked();
     const before = vi.mocked(api.post).mock.calls.length;

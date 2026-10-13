@@ -239,6 +239,10 @@ export function Parse() {
       }
       navigate('/tasks');
     } catch (err) {
+      // T10 真机复验二轮：成功路径曾误报兜底文案而真因不可见——
+      // 非 ApiError（fetch 层 reject）时 console 留原始错误现场，
+      // 兜底文案不变。
+      console.error('任务提交失败', err);
       setDownloadError(
         err instanceof ApiError ? err.message : '任务提交失败，请稍后重试',
       );

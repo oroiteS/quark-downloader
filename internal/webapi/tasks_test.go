@@ -907,6 +907,19 @@ func TestCreateTasksSkipsExistingCompleteFile(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 			t.Fatalf("响应不是合法 JSON: %v（body=%s）", err, w.Body)
 		}
+		// T10 真机复验二轮：全 skipped（0 成功提交）时 task_ids 的 wire
+		// 字节必须为 [] 而非 null——前端契约 CreateTasksResult.task_ids
+		// 是 string[]，null 会炸掉消费面。[]string 解码对 null 与 [] 同为
+		// len==0（上面的断言钉不住），故对原始字节再断言一次。
+		var raw struct {
+			TaskIDs json.RawMessage `json:"task_ids"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+			t.Fatalf("响应不是合法 JSON: %v（body=%s）", err, w.Body)
+		}
+		if string(raw.TaskIDs) != "[]" {
+			t.Fatalf("task_ids wire 字节 = %s, 期望字面 []（非 null，契约 string[]）", raw.TaskIDs)
+		}
 		if len(body.TaskIDs) != 0 || len(fm.snapshot()) != 0 {
 			t.Fatalf("task_ids = %v, Submit %d 次, 期望均 0（已存在不提交）", body.TaskIDs, len(fm.snapshot()))
 		}

@@ -241,10 +241,13 @@ func (a *App) handleCreateTasks(c *gin.Context) {
 	budget := engine.AllocateBudget(sizes,
 		max(snap.Threads, 1), max(snap.MaxConcurrentTasks, 1))
 
-	// ④ 逐项 Submit（一文件一任务）＋ ⑤ TaskCtx 落盘。
+	// ④ 逐项 Submit（一文件一任务）＋ ⑤ TaskCtx 落盘。taskIDs/skipped
+	// 预初始化为空切片而非 var nil（T10 真机复验二轮：全 skipped 时 nil
+	// 经 gin.H 序列化为 null，违反前端契约 CreateTasksResult.task_ids
+	// 为 string[]——fetch 侧 json() 得 null 后 r.task_ids 消费面被炸）。
 	var (
-		taskIDs []string
-		skipped []skippedItem
+		taskIDs = []string{}
+		skipped = []skippedItem{}
 		newCtxs []store.TaskCtx
 	)
 	createdAt := time.Now().Unix()

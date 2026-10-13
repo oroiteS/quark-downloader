@@ -44,6 +44,17 @@ export function AccountBadge() {
   const dashoffset = 100 * (1 - ratio);
   const showImg = avatar !== '' && !imgFailed;
 
+  // 容量环三级色（用户需求，T10 真机复验二轮纳入）：占用 <70% 蓝
+  // （primary）、70%（含）～90% 黄（warning）、90%（含）以上红（error，
+  // ratio 已钳 1——可超 100% 显示满环红）。环 aria-hidden 装饰，色对
+  // surface 的对比度按 WCAG 图形 3:1 阈值自查（tokens.css 头注释）。
+  const ringColor =
+    ratio < 0.7
+      ? 'var(--color-primary)'
+      : ratio < 0.9
+        ? 'var(--color-warning)'
+        : 'var(--color-error)';
+
   return (
     <div className="account-badge">
       {showImg ? (
@@ -86,7 +97,7 @@ export function AccountBadge() {
           cy="20"
           r={RADIUS}
           fill="none"
-          style={{ stroke: 'var(--color-primary)' }}
+          style={{ stroke: ringColor }}
           strokeWidth="4"
           strokeLinecap="round"
           strokeDasharray={100}
