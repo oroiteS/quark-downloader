@@ -297,7 +297,7 @@ func (a *App) handleQRState(c *gin.Context) {
 				"保存登录凭据失败: "+err.Error())
 			return
 		}
-		a.cachedAccount = info // 昵称/头像缓存：account 的 QuickCheck 走兜底拿不到 info 时回退（T14 真机发现 B）
+		a.refreshAccountCacheLocked(info) // 昵称/头像双层缓存（进程内 + 盘）：account 的 QuickCheck 走兜底拿不到 info 时回退（T14 真机发现 B；T15 升级为跨重启持久；持 authMu 临界区内调 Locked 变体）
 		a.startKeepaliveLocked()
 		a.broadcastAuthEvent("login", true) // Task 12：登录成功广播 auth 帧
 		c.JSON(http.StatusOK, gin.H{
@@ -373,6 +373,13 @@ func (a *App) handleCookieImport(c *gin.Context) {
 			"保存登录凭据失败: "+err.Error())
 		return
 	}
+	// 昵称/头像缓存与扫码链同权（T15）：导入链没有 ExchangeCookie 的顺带
+	// info，快速校验一次补取（§2.6 快端点）；失败不阻断导入——昵称只是
+	// 显示件，重启后 handleAccount 的 QuickCheck 成功路径仍会刷新。
+	if _, info, err := a.auth.QuickCheck(c.Request.Context()); err == nil &&
+		(info.Nickname != "" || info.AvatarURI != "") {
+		a.refreshAccountCacheLocked(info) // 持 authMu 临界区内调 Locked 变体（T15）
+	}
 	a.startKeepaliveLocked()
 	a.broadcastAuthEvent("login", true) // Task 12：登录成功广播 auth 帧
 	c.JSON(http.StatusOK, gin.H{"logged_in": true})
@@ -419,12 +426,27 @@ func (a *App) handleAccount(c *gin.Context) {
 			"登录已失效，请重新扫码登录")
 		return
 	}
+	// QuickCheck 拿到非空 info：刷新双层缓存（进程内 + 盘，T15）——把
+	// 协议层现值同步到持久层，供下次重启后的回退链消费。
+	if info.Nickname != "" || info.AvatarURI != "" {
+		a.refreshAccountCache(info)
+	}
 	// QuickCheck wall 域失败走 probeFileSort 兜底时 info 为零值（协议层
-	// 规格：兜底拿不到账号信息）——昵称/头像回退登录链缓存（T14 发现 B）。
+	// 规格：兜底拿不到账号信息）——昵称/头像回退链（T14 发现 B；T15 扩
+	// 展为跨重启）：进程内 cachedAccount（登录链缓存）→ account.json（盘，
+	// 重启幸存）；读到非空昵称即用，两者皆空则保持空（前端占位兜底）。
 	if info.Nickname == "" && info.AvatarURI == "" {
 		a.authMu.Lock()
 		cached := a.cachedAccount
 		a.authMu.Unlock()
+		if cached.Nickname == "" {
+			if disk := loadAccountProfile(a.paths.DataDir); disk.Nickname != "" {
+				cached = protocol.AccountInfo{
+					Nickname:  disk.Nickname,
+					AvatarURI: disk.Avatar,
+				}
+			}
+		}
 		if cached.Nickname != "" {
 			info = cached
 		}
