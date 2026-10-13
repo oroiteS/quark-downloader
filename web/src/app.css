@@ -1,0 +1,153 @@
+/**
+ * App 壳布局样式（Task 4，D2）：skip link / 侧栏 / 主区 / 启动屏。
+ * 与 App.tsx 同目录携带（repo 约定：组件样式随组件文件）；全部走
+ * tokens.css 变量，不硬编码色值；间距用逻辑属性（skill CSS 规范）。
+ */
+
+/* ---- skip link（skill a11y 模式）：默认移出视口，获得焦点即滑入 ---- */
+.skip-link {
+  position: fixed;
+  top: -48px;
+  left: 0;
+  z-index: 100;
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+  text-decoration: none;
+  border-radius: 0 0 var(--radius-md) 0;
+  transition: top var(--transition-fast);
+}
+
+.skip-link:focus {
+  top: 0;
+}
+
+.skip-link:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* ---- D2 壳：左侧固定导航 + 主区 ---- */
+.app-shell {
+  min-height: 100vh;
+}
+
+.sidebar {
+  position: fixed;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: var(--space-6) var(--space-4);
+  background: var(--color-surface-variant);
+  border-inline-end: 1px solid var(--color-border);
+}
+
+.sidebar__nav {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.sidebar__link {
+  display: flex;
+  align-items: center;
+  min-height: 44px; /* skill：触控/点击目标 ≥44px */
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-on-surface);
+  font-weight: 600;
+  text-decoration: none;
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast);
+}
+
+.sidebar__link:hover {
+  background: var(--color-secondary);
+}
+
+.sidebar__link--active {
+  background: var(--color-secondary);
+  color: var(--color-on-secondary);
+}
+
+.sidebar__link:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.app-main {
+  margin-inline-start: 220px;
+  padding: var(--space-6);
+}
+
+/* ---- AccountBadge ---- */
+.account-badge {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-2);
+}
+
+.capacity-ring {
+  flex: none;
+}
+
+.capacity-ring__track {
+  stroke: var(--color-border);
+}
+
+.capacity-ring__value {
+  stroke: var(--color-primary);
+  transition: stroke-dashoffset var(--transition-base);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .capacity-ring__value {
+    transition: none;
+  }
+}
+
+.account-badge__meta {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.account-badge__name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-badge__capacity {
+  font-size: var(--text-xs);
+  color: var(--color-on-surface-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 启动屏（loggedIn=null 探测中）与登录占位 ---- */
+.app-boot,
+.app-login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: var(--space-4);
+  color: var(--color-on-surface-muted);
+}
+
+.app-boot p {
+  color: var(--color-on-surface-muted);
+}
+
+/* ---- 页面占位（Task 5+ 替换时一并移除）---- */
+.page-placeholder {
+  color: var(--color-on-surface-muted);
+}
