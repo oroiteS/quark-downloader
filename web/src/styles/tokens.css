@@ -5,20 +5,28 @@
  * --shadow-* / --transition-*。light 为默认（:root 与 [data-theme="light"]
  * 同值，后者保证显式锁定时语义完整），dark 为 [data-theme="dark"] 覆盖段。
  *
+ * 壳层分层（2025 前端重构，用户需求「左侧灰栏、右侧深色栏」，浅色模式
+ * 同构）：--color-main-bg 承载 body/主区（深），--color-surface 承载
+ * 卡片/对话框/输入等浮起面板（略亮于 main-bg），--color-sidebar-* 承载
+ * 左侧栏（灰，亮度介于 main 与 surface 之间）。
+ *
  * AA 对比度自查（WCAG 2.1，正文阈值 4.5:1）：
  * - light: primary #0066FF on #FFFFFF = 4.83:1 ✓；on-surface #1A1A1A on
  *   #FFFFFF ≈ 17.4:1 ✓；error #D32F2F 4.98 ✓；success #2E7D32 5.12 ✓；
- *   warning #B36000 4.58 ✓；info #1976D2 4.58 ✓
- * - dark:  primary #4D94FF on #1A1A1A = 5.78:1 ✓；on-surface #FFFFFF ≈ 17.4:1 ✓；
- *   error #EF5350 ≈ 5.0 ✓；success #66BB6A ≈ 7.3 ✓；warning #FFB74D > 7 ✓；
- *   info #64B5F6 ≈ 6 ✓
+ *   warning #B36000 4.58 ✓；info #1976D2 4.58 ✓；on-surface-muted #5C5C5C
+ *   on sidebar #ECEEF1 ≈ 5.4:1 ✓、on main-bg #F5F6F8 ≈ 6:1 ✓
+ * - dark:  primary #4D94FF on #1C1D21 ≈ 5.9:1 ✓；on-surface #FFFFFF ≈ 16:1 ✓；
+ *   error #EF5350 ≈ 5.2 ✓；success #66BB6A ≈ 7.6 ✓；warning #FFB74D > 7 ✓；
+ *   info #64B5F6 ≈ 6.2 ✓；on-surface-muted #A3A3A3 on sidebar #202227
+ *   ≈ 6.2:1 ✓、on surface #1C1D21 ≈ 6.6:1 ✓
  * （on-primary 均与对应 primary 底色成对自查 ≥4.5:1）
  *
- * 容量环三级色（T10 真机复验二轮，环 aria-hidden 装饰——WCAG 非文本
- * 图形 3:1 阈值即可，对 --color-surface 实算）：light warning #b36000
- * 4.58:1 ✓、dark warning #FFB74D ≈10.1:1 ✓（error/primary 亦远超 3:1）。
- * 分级语义：占用 <70% primary、70%（含）～90% warning、90%（含）以上
- * error（可超 100%，比例钳 1）——选色在 AccountBadge。
+ * 容量进度条（2025 前端重构，环废弃；条 aria-hidden 装饰——WCAG 非文本
+ * 图形 3:1 阈值即可）：填充 vs 槽底 --color-capacity-track 实算——
+ * light #0066FF/#D9DCE1 ≈ 4.0:1 ✓、#D32F2F/#D9DCE1 ≈ 3.6:1 ✓；
+ * dark #4D94FF/#3A3D44 ≈ 3.7:1 ✓、#EF5350/#3A3D44 ≈ 3.1:1 ✓。
+ * 分级语义：占用 <100% primary（未占满）、≥100%（含超限，钳 1）error
+ * 占满——选色在 AccountBadge。
  */
 
 /* ---------- light（默认）---------- */
@@ -31,9 +39,13 @@
   --color-secondary: #eef4ff;
   --color-on-secondary: #0a3d99;
 
-  /* Colors - Surface */
+  /* Colors - Surface（surface=浮起面板；main-bg=主区；sidebar=左侧灰栏） */
   --color-surface: #ffffff;
   --color-surface-variant: #f5f5f5;
+  --color-main-bg: #f5f6f8;
+  --color-sidebar-bg: #eceef1;
+  --color-sidebar-hover: #e2e5e9;
+  --color-sidebar-active: #d6dade;
   --color-on-surface: #1a1a1a;
   --color-on-surface-muted: #5c5c5c;
 
@@ -47,6 +59,9 @@
   --color-warning: #b36000;
   --color-info: #1976d2;
 
+  /* 容量进度条槽底（对 sidebar-bg 可辨，与填充色 ≥3:1） */
+  --color-capacity-track: #d9dce1;
+
   /* Focus Ring */
   --color-focus: #0066ff;
 
@@ -59,11 +74,16 @@
   --color-primary: #4d94ff;
   --color-primary-hover: #6fa8ff;
   --color-on-primary: #0b1929;
+
   --color-secondary: #14263f;
   --color-on-secondary: #a8c7f5;
 
-  --color-surface: #1a1a1a;
-  --color-surface-variant: #2a2a2a;
+  --color-surface: #1c1d21;
+  --color-surface-variant: #2a2a2e;
+  --color-main-bg: #121316;
+  --color-sidebar-bg: #202227;
+  --color-sidebar-hover: #2b2d33;
+  --color-sidebar-active: #35383f;
   --color-on-surface: #ffffff;
   --color-on-surface-muted: #a3a3a3;
 
@@ -74,6 +94,8 @@
   --color-success: #66bb6a;
   --color-warning: #ffb74d;
   --color-info: #64b5f6;
+
+  --color-capacity-track: #3a3d44;
 
   --color-focus: #4d94ff;
 

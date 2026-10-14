@@ -110,31 +110,3 @@
   justify-content: flex-end;
 }
 
-/* ---- 账号区（退出登录） ---- */
-.settings__account h2 {
-  margin: 0 0 var(--space-2);
-  font-size: var(--text-lg);
-}
-
-.settings__account p {
-  margin: 0 0 var(--space-3);
-  font-size: var(--text-sm);
-  color: var(--color-on-surface-muted);
-}
-
-/* ---- 退出登录 Dialog ---- */
-.settings__dialog-form {
-  display: grid;
-  gap: var(--space-4);
-  min-inline-size: min(20rem, 70vw);
-}
-
-.settings__dialog-text {
-  margin: 0;
-}
-
-.settings__dialog-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-3);
-}

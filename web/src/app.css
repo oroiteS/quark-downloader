@@ -1,7 +1,8 @@
 /**
- * App 壳布局样式（Task 4，D2）：skip link / 侧栏 / 主区 / 启动屏。
- * 与 App.tsx 同目录携带（repo 约定：组件样式随组件文件）；全部走
- * tokens.css 变量，不硬编码色值；间距用逻辑属性（skill CSS 规范）。
+ * App 壳布局样式（Task 4，D2；2025 前端重构：左灰右深分层、长条容量
+ * 进度条、左下角用户菜单）。与 App.tsx 同目录携带（repo 约定：组件样式
+ * 随组件文件）；全部走 tokens.css 变量，不硬编码色值；间距用逻辑属性
+ * （skill CSS 规范）。
  */
 
 /* ---- skip link（skill a11y 模式）：默认移出视口，获得焦点即滑入 ---- */
@@ -27,7 +28,7 @@
   outline-offset: 2px;
 }
 
-/* ---- D2 壳：左侧固定导航 + 主区 ---- */
+/* ---- D2 壳：左侧固定导航（灰）+ 主区（深，body 底色透出） ---- */
 .app-shell {
   min-height: 100vh;
 }
@@ -41,8 +42,11 @@
   flex-direction: column;
   justify-content: space-between;
   padding: var(--space-6) var(--space-4);
-  background: var(--color-surface-variant);
-  border-inline-end: 1px solid var(--color-border);
+  background: var(--color-sidebar-bg);
+}
+
+.sidebar__nav-wrap {
+  min-block-size: 0;
 }
 
 .sidebar__nav {
@@ -56,6 +60,7 @@
 .sidebar__link {
   display: flex;
   align-items: center;
+  gap: var(--space-3);
   min-height: 44px; /* skill：触控/点击目标 ≥44px */
   padding: var(--space-2) var(--space-3);
   color: var(--color-on-surface);
@@ -65,13 +70,16 @@
   transition: background var(--transition-fast);
 }
 
+.sidebar__link svg {
+  flex: none;
+}
+
 .sidebar__link:hover {
-  background: var(--color-secondary);
+  background: var(--color-sidebar-hover);
 }
 
 .sidebar__link--active {
-  background: var(--color-secondary);
-  color: var(--color-on-secondary);
+  background: var(--color-sidebar-active);
 }
 
 .sidebar__link:focus-visible {
@@ -84,13 +92,40 @@
   padding: var(--space-6);
 }
 
-/* ---- AccountBadge ---- */
+/* ---- AccountBadge（左下用户区：触发框 + 进度条 + 容量文本 + 弹出菜单） */
 .account-badge {
+  position: relative; /* 弹出菜单锚点 */
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2);
+}
+
+/* 昵称/头像触发框：点击弹用户菜单（aria-expanded/haspopup 在 TSX） */
+.account-badge__trigger {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  min-width: 0;
+  inline-size: 100%;
+  min-height: 44px;
   padding: var(--space-2);
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-on-surface);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.account-badge__trigger:hover {
+  background: var(--color-sidebar-hover);
+}
+
+.account-badge__trigger:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
 }
 
 /* 头像（T10 真机验收③）：32px 圆形；无值/加载失败时首字符占位圈 */
@@ -111,31 +146,6 @@
   user-select: none;
 }
 
-.capacity-ring {
-  flex: none;
-}
-
-.capacity-ring__track {
-  stroke: var(--color-border);
-}
-
-.capacity-ring__value {
-  stroke: var(--color-primary);
-  transition: stroke-dashoffset var(--transition-base);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .capacity-ring__value {
-    transition: none;
-  }
-}
-
-.account-badge__meta {
-  display: grid;
-  gap: var(--space-1);
-  min-width: 0;
-}
-
 .account-badge__name {
   font-size: var(--text-sm);
   font-weight: 600;
@@ -144,10 +154,94 @@
   white-space: nowrap;
 }
 
+/* 长条进度条 + 容量文本（条在昵称/头像下方，文本在条下方） */
+.account-badge__usage {
+  display: grid;
+  gap: var(--space-1);
+  padding-inline: var(--space-2);
+}
+
+.capacity-bar {
+  block-size: 6px;
+  border-radius: var(--radius-full);
+  background: var(--color-capacity-track);
+  overflow: hidden;
+}
+
+.capacity-bar__fill {
+  block-size: 100%;
+  border-radius: inherit;
+  transition: width var(--transition-base);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .capacity-bar__fill {
+    transition: none;
+  }
+}
+
 .account-badge__capacity {
   font-size: var(--text-xs);
   color: var(--color-on-surface-muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* ---- 用户菜单（点击昵称/头像框弹出，锚定上方；样式参考弹出菜单设计稿） */
+.user-menu {
+  position: absolute;
+  inset-inline: 0;
+  bottom: calc(100% + var(--space-2));
+  z-index: 50;
+  display: grid;
+  padding: var(--space-2);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+.user-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  inline-size: 100%;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-on-surface);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: start;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.user-menu__item svg {
+  flex: none;
+}
+
+.user-menu__item:hover {
+  background: var(--color-surface-variant);
+}
+
+.user-menu__item:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* 退出登录确认 Dialog 内表单（Button 组件自带样式，此处只管排布） */
+.account-badge__dialog-form {
+  display: grid;
+  gap: var(--space-4);
+  min-inline-size: min(20rem, 70vw);
+}
+
+.account-badge__dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
 }
 
 /* ---- 启动屏（loggedIn=null 探测中）与登录占位 ---- */

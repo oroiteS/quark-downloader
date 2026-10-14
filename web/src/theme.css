@@ -1,5 +1,6 @@
-/* 全局基底（Task 1）：tokens 引入 + 重置 + body 主题色。
-   组件样式各自携带；布局样式归后续任务。 */
+/* 全局基底（Task 1；2025 前端重构：body 换壳层主区底色 --color-main-bg，
+   与左侧栏 --color-sidebar-bg 形成「左灰右深」分层；tokens 引入 + 重置。
+   组件样式各自携带；布局样式归 app.css。 */
 @import './styles/tokens.css';
 
 *,
@@ -19,7 +20,7 @@ body {
   font-size: var(--text-base);
   line-height: var(--leading-normal);
   color: var(--color-on-surface);
-  background: var(--color-surface);
+  background: var(--color-main-bg);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -35,13 +36,4 @@ h6 {
 
 p {
   margin: 0;
-}
-
-/* Task 1 占位壳样式（App/布局在 Task 4 落地后移除） */
-.app-bootstrap {
-  display: grid;
-  place-items: center;
-  min-height: 100vh;
-  font-size: var(--text-3xl);
-  color: var(--color-primary);
 }

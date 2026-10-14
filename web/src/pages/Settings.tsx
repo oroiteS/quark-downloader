@@ -1,5 +1,6 @@
 /**
- * 设置页（Task 9，D10/D7/G5/G13）：设置读写 + 主题即时生效 + 退出登录。
+ * 设置页（Task 9，D10/D7/G5/G13；2025 前端重构：退出登录迁至左下角用户
+ * 菜单——AccountBadge，本页不再含账号区）。
  *
  * - 数据流：挂载 GET /api/settings 四字段回显；「保存」PUT /api/settings
  *   **全量四字段**（Review Focus #2：仅改主题也齐发 destDir/threads/max 原值，
@@ -17,21 +18,15 @@
  *   启动编排负责，页面不重复覆盖）。
  * - threads 缺省渲染 32（G5）：GET 值不在档位枚举时回退 32 展示，
  *   保存按展示值上送（展示即提交）。
- * - 退出登录：Dialog 确认 → POST /api/logout → logoutReset() 清会话 →
- *   页面业务跳转 /login（与 Login 登录成功跳 / 同型先例；守卫单通道
- *   语义不破坏——该通道仅约束会话过期，登出属页面业务路径）。失败
- *   toast error、Dialog 保留可重试（Drive 409 同型）。
  */
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Button, Card, Dialog, Input, Spinner, toast } from '../components/ui';
+import { Button, Card, Input, Spinner, toast } from '../components/ui';
 import { api } from '../api/client';
 import { ApiError } from '../api/types';
 import type { PickDirResult } from '../api/types';
 import { applyTheme } from '../theme';
 import type { ThemeLock } from '../theme';
-import { useSession } from '../stores/session';
 import './settings.css';
 
 /** 后端 Settings 契约（webapi/settings.go json tag 逐字；PUT 同形全量替换）。 */
@@ -55,7 +50,6 @@ const THEME_OPTIONS: { value: ThemeLock; label: string }[] = [
 ];
 
 export function Settings() {
-  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [destDir, setDestDir] = useState('');
@@ -67,8 +61,6 @@ export function Settings() {
   // 目录选择器（计划外 Task 11）：请求期间按钮 loading（Button 的
   // disabled||loading 同源防竞态点击）；回填不自动保存。
   const [picking, setPicking] = useState(false);
-  const [logoutOpen, setLogoutOpen] = useState(false);
-  const [logoutBusy, setLogoutBusy] = useState(false);
   // 跟随分支的 matchMedia 监听卸载函数（D7）：切换前清旧、卸载兜底清。
   const themeCleanupRef = useRef<() => void>(() => {});
 
@@ -147,21 +139,6 @@ export function Settings() {
       );
     } finally {
       setPicking(false);
-    }
-  }
-
-  async function handleLogout(): Promise<void> {
-    setLogoutBusy(true);
-    try {
-      await api.post('/api/logout');
-      useSession.getState().logoutReset();
-      navigate('/login', { replace: true });
-    } catch (e) {
-      toast.show(
-        e instanceof ApiError ? e.message : '退出登录失败，请稍后重试',
-        'error',
-      );
-      setLogoutBusy(false); // Dialog 保留可重试
     }
   }
 
@@ -301,44 +278,6 @@ export function Settings() {
           </div>
         </Card>
       </form>
-
-      <Card padding="lg">
-        <section className="settings__account">
-          <h2>账号</h2>
-          <p>退出当前账号后，需重新扫码或导入 Cookie 登录。</p>
-          <Button variant="secondary" onClick={() => setLogoutOpen(true)}>
-            退出登录
-          </Button>
-        </section>
-      </Card>
-
-      <Dialog
-        open={logoutOpen}
-        onClose={() => setLogoutOpen(false)}
-        title="退出登录"
-      >
-        <form
-          className="settings__dialog-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void handleLogout();
-          }}
-        >
-          <p className="settings__dialog-text">确定要退出当前账号吗？</p>
-          <div className="settings__dialog-actions">
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => setLogoutOpen(false)}
-            >
-              取消
-            </Button>
-            <Button type="submit" loading={logoutBusy}>
-              确认退出
-            </Button>
-          </div>
-        </form>
-      </Dialog>
     </section>
   );
 }
