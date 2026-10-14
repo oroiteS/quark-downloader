@@ -1,0 +1,8 @@
+# pnpm 12 配置中枢（单包仓库亦读此文件）。
+# esbuild 的 postinstall 是其平台二进制的校验/回退安装；pnpm 12 默认拦截
+# 未声明依赖的构建脚本（CI 上 ERR_PNPM_IGNORED_BUILDS 直接失败），此处
+# 显式放行。注意：pnpm 12 的配置键是 allowBuilds（映射形态，包名→是否允许；
+# 旧名 onlyBuiltDependencies 列表形态已废弃不生效）。首个需要构建脚本的
+# 依赖新增时在此追加。
+allowBuilds:
+  esbuild: true
