@@ -149,6 +149,9 @@ type fakeUpstream struct {
 	share    map[string][]protocol.FileEntry // share: pdir_fid → 条目
 	stoken   string                          // sharepage/token 返回的新 stoken
 	links    map[string]string               // download: fid → download_url
+	// downloadStatus 非零时 download 端点直回该状态码（鉴权失效广播测试用：
+	// Cookie 半失效真机态——download 接口 401/412 而列表/账号接口放行）。
+	downloadStatus int
 }
 
 func (u *fakeUpstream) record(r *http.Request, body string) {
@@ -188,6 +191,10 @@ func (u *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		u.mu.Unlock()
 		fmt.Fprintf(w, `{"status":200,"code":0,"data":{"stoken":%q}}`, st)
 	case r.URL.Path == "/1/clouddrive/file/download":
+		if u.downloadStatus != 0 {
+			w.WriteHeader(u.downloadStatus)
+			return
+		}
 		var req dlBody
 		if err := json.Unmarshal([]byte(body), &req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -663,6 +670,69 @@ func TestMakeRefresherShareAndDrive(t *testing.T) {
 			t.Fatalf("stoken 为空应报错, 得到 URL %q", url)
 		}
 	})
+}
+
+// ---- ⑤c Refresher 鉴权失效广播（下载链路 401/412 → auth expired 帧）----
+
+// TestMakeRefresherAuthExpiredBroadcast 下载链路三入口全 401/412（真机
+// Cookie 半失效态：列表/账号接口放行、download 接口拒绝）→ refresher
+// 返回登录失效错，且 hub 广播 auth expired 帧——与保活 onExpire 同帧同
+// 语义，前端 logoutReset 后守卫跳 /login，消除「看着已登录却下不动」的
+// 困惑态。403 归引擎 §2.10 直链签名域（可能是风控而非掉登录），不广播。
+// SetAuthHeal(nil) 跳过自愈退避（heal 语义协议层自有测试；此处只验广播）。
+func TestMakeRefresherAuthExpiredBroadcast(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		wantFrame  bool
+	}{
+		{"401 → 广播 expired", http.StatusUnauthorized, true},
+		{"412 → 广播 expired", http.StatusPreconditionFailed, true},
+		{"403 → 不广播（引擎直链签名域）", http.StatusForbidden, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			up := &fakeUpstream{downloadStatus: tc.status}
+			fm := &fakeManager{}
+			paths := taskTestPaths(t)
+			app := newTasksTestApp(t, up, fm, taskTestSettings(filepath.Join(paths.DataDir, "dl")), paths)
+			app.session.SetAuthHeal(nil)
+
+			frames, cancel := app.hub.Subscribe()
+			defer cancel()
+
+			_, err := app.makeRefresher(store.TaskCtx{
+				FromShare: false, FID: "f1", FileName: "a.bin", Size: 10,
+			})(context.Background())
+			if err == nil {
+				t.Fatal("三入口全失败应报错")
+			}
+
+			if !tc.wantFrame {
+				select {
+				case e := <-frames:
+					t.Fatalf("非 401/412 失败不应广播 auth 帧, 收到 %v", e)
+				case <-time.After(150 * time.Millisecond):
+				}
+				return
+			}
+			select {
+			case e := <-frames:
+				if e.Type != "auth" {
+					t.Fatalf("帧类型 = %q, 期望 auth", e.Type)
+				}
+				var p authPayload
+				if err := json.Unmarshal(e.Payload, &p); err != nil {
+					t.Fatalf("auth 载荷解析: %v", err)
+				}
+				if p.Event != "expired" || p.LoggedIn {
+					t.Fatalf("auth 载荷 = {event:%q logged_in:%v}, 期望 {expired false}", p.Event, p.LoggedIn)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("下载鉴权失效（HTTP %d）未广播 auth expired 帧", tc.status)
+			}
+		})
+	}
 }
 
 // ---- ⑥ TaskCtx 落盘字段（§6.2）----

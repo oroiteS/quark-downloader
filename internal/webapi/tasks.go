@@ -367,6 +367,16 @@ func (a *App) makeRefresher(t store.TaskCtx) func(ctx context.Context) (string, 
 		}
 		results, err := sess.DownloadLinks(ctx, req)
 		if err != nil {
+			// 下载链路鉴权失效（401/412）→ 广播 auth expired 帧，与保活
+			// onExpire 同帧同语义：前端 logoutReset 后守卫跳 /login。真机
+			// 实锤的「Cookie 半失效」态（账号/列表接口放行、download 接口
+			// 拒绝）此前只在任务报错里体现，用户看着已登录却下不动；DoAPI
+			// 返回该错前已自愈重试过（退避→QuickCheck→重试一次）仍失败，
+			// 视为服务端确定性掉登录。多任务并发失败会重复广播——前端
+			// logoutReset 幂等、守卫跳转单通道只变一次，重复帧无害。
+			if isAuthExpiredErr(err) {
+				a.broadcastAuthEvent("expired", false)
+			}
 			return "", fmt.Errorf("重取直链失败: %w", err)
 		}
 		for _, r := range results {
@@ -376,6 +386,20 @@ func (a *App) makeRefresher(t store.TaskCtx) func(ctx context.Context) (string, 
 		}
 		return "", fmt.Errorf("重取直链失败: 结果中无 %s 的可用 URL", t.FID)
 	}
+}
+
+// isAuthExpiredErr 判定错误链中是否含下载接口的鉴权失效（*protocol.APIError
+// 且 StatusCode ∈ {401, 412}，与 QuickCheck 的失效语义一致）。DownloadLinks
+// 经 errors.Join 合并三入口错误、makeRefresher 再 %w 包装——errors.As 可
+// 穿透 Join 树与包装链。403 不纳入：直链场景 403=签名过期属引擎 §2.10 域
+// （可能只是风控而非掉登录），误广播会把有效会话踢回登录页。
+func isAuthExpiredErr(err error) bool {
+	var apiErr *protocol.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.StatusCode == http.StatusUnauthorized ||
+		apiErr.StatusCode == http.StatusPreconditionFailed
 }
 
 // expandFIDs 逐个 fid 递归展开目录树，收集文件项（relDir 保留子树内
