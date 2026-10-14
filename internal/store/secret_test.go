@@ -64,6 +64,36 @@ func newTestSecretStore(t *testing.T, kr keyringAPI) *SecretStore {
 	return newSecretStore(testPaths(t.TempDir()), kr, "testhost", "tester")
 }
 
+// TestSecretStorePortableSkipsKeyring（Windows portable 打包配套，2025）：
+// Portable=true 的 Paths 下 SaveCookie/LoadCookie 完全不触碰 keyring——
+// keyring 在 Windows 即凭据管理器（按用户配置存储，不随目录走），portable
+// 语义要求数据（含 Cookie）全落 exe 旁 ./data/，换机/换目录随文件夹带走。
+// 落点为文件兜底 secret.bin（AES-GCM 机器绑定加密）。
+func TestSecretStorePortableSkipsKeyring(t *testing.T) {
+	p := testPaths(t.TempDir())
+	p.Portable = true
+	kr := &fakeKeyring{}
+	s := newSecretStore(p, kr, "testhost", "tester")
+
+	if err := s.SaveCookie("puus=portable"); err != nil {
+		t.Fatalf("SaveCookie: %v", err)
+	}
+	if kr.setCalls != 0 || kr.getCalls != 0 {
+		t.Fatalf("portable 模式不得触碰 keyring: set=%d get=%d", kr.setCalls, kr.getCalls)
+	}
+	// 落点必须是 DataDir/secret.bin（keyring 未存任何条目）
+	if _, err := os.Stat(secretFilePath(s)); err != nil {
+		t.Fatalf("Cookie 未落兜底文件 %s: %v", secretFilePath(s), err)
+	}
+	// RoundTrip：同机读回明文
+	if got := s.LoadCookie(); got != "puus=portable" {
+		t.Fatalf("LoadCookie = %q, want %q", got, "puus=portable")
+	}
+	if kr.getCalls != 0 {
+		t.Fatalf("LoadCookie 仍触碰了 keyring: %d 次", kr.getCalls)
+	}
+}
+
 // secretFilePath 取 s 的兜底文件路径(DataDir/secret.bin)。
 func secretFilePath(s *SecretStore) string {
 	return filepath.Join(s.paths.DataDir, secretFileName)

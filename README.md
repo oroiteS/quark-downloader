@@ -27,7 +27,8 @@ go build -o feiwu ./cmd/feiwu
 
 - `.github/workflows/ci.yml`：push main / PR 跑 Go 全量测试、前端测试与嵌入产物构建检查。
 - `.github/workflows/release.yml`：push `v*` tag 自动打包并发布 GitHub Release——
-  Windows portable exe（`feiwu-windows-amd64.exe`，CGO=0 交叉编译）+
+  Windows portable zip（`feiwu-windows-amd64-portable.zip`，CGO=0 交叉编译；内含
+  `feiwu.exe` 与 `feiwu.portable` 标记，数据/Cookie 全落 exe 旁 `./data/`，免安装）+
   macOS universal dmg（`feiwu-vX.Y.Z-macos-universal.dmg`，arm64+amd64 双原生构建
   lipo 合并，内含带图标的 `feiwu.app`）。手动触发（workflow_dispatch）只产出
   artifacts 不发布。dmg 未签名未公证，首次打开需右键 → 打开。

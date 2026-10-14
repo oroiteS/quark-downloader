@@ -1,10 +1,11 @@
 # 自动打包发布（push tag v* 或手动 dispatch）：
-#   - Windows：portable exe（ubuntu 上 CGO_ENABLED=0 交叉编译——keyring 在
-#     Windows 走纯 Go 的 wincred，无需 cgo）
+#   - Windows：portable zip（exe + feiwu.portable 标记；ubuntu 上
+#     CGO_ENABLED=0 交叉编译——keyring 在 Windows 走纯 Go 的 wincred。
+#     标记使数据/Cookie 全落 exe 旁 ./data/，免安装随文件夹走）
 #   - macOS：universal .app 打成 dmg——macos-14(arm64) + macos-15-intel(amd64)
 #     双原生构建（keychain 走 cgo 不交叉编译），dmg job 用 lipo 合并 universal；
 #     dmg 未签名未公证，首开需右键 → 打开（绕过 Gatekeeper）
-# tag 触发 → 发布 GitHub Release（exe + dmg 两资产）；dispatch → 仅传 artifacts。
+# tag 触发 → 发布 GitHub Release（zip + dmg 两资产）；dispatch → 仅传 artifacts。
 name: release
 
 on:
@@ -42,15 +43,25 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
-      - name: go build（windows/amd64 portable exe）
+      - name: go build（windows/amd64）
         run: |
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
             go build -trimpath -ldflags "-s -w" -o feiwu-windows-amd64.exe ./cmd/feiwu
 
+      # portable zip = exe + feiwu.portable 标记：启动后数据（含 Cookie）全落
+      # exe 旁 ./data/（Cookie 走加密文件而非凭据管理器，见 store/paths.go），
+      # 文件夹整体可移动、免安装。
+      - name: 打 portable zip（exe + portable 标记）
+        run: |
+          mkdir pkg
+          mv feiwu-windows-amd64.exe pkg/feiwu.exe
+          touch pkg/feiwu.portable
+          (cd pkg && zip ../feiwu-windows-amd64-portable.zip feiwu.exe feiwu.portable)
+
       - uses: actions/upload-artifact@v4
         with:
-          name: feiwu-windows-amd64.exe
-          path: feiwu-windows-amd64.exe
+          name: feiwu-windows-amd64-portable.zip
+          path: feiwu-windows-amd64-portable.zip
           if-no-files-found: error
 
   macos:
@@ -193,6 +204,6 @@ jobs:
         run: |
           ls -lh artifacts
           gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
-            "artifacts/feiwu-windows-amd64.exe" "artifacts/feiwu-${GITHUB_REF_NAME}-macos-universal.dmg" \
+            "artifacts/feiwu-windows-amd64-portable.zip" "artifacts/feiwu-${GITHUB_REF_NAME}-macos-universal.dmg" \
             || gh release upload "$GITHUB_REF_NAME" --clobber \
-              "artifacts/feiwu-windows-amd64.exe" "artifacts/feiwu-${GITHUB_REF_NAME}-macos-universal.dmg"
+              "artifacts/feiwu-windows-amd64-portable.zip" "artifacts/feiwu-${GITHUB_REF_NAME}-macos-universal.dmg"

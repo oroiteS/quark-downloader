@@ -57,6 +57,9 @@ func TestResolvePathsWindowsPortableByEnv(t *testing.T) {
 	if p.Root != exeDir || p.DataDir != filepath.Join(exeDir, "data") {
 		t.Errorf("portable(env): Root/DataDir = %q/%q, want %q/%q", p.Root, p.DataDir, exeDir, filepath.Join(exeDir, "data"))
 	}
+	if !p.Portable {
+		t.Error("portable(env): Portable = false, want true（SecretStore 据此绕开 keyring）")
+	}
 	if p.SettingsFile != filepath.Join(exeDir, "data", "settings.json") {
 		t.Errorf("portable(env): SettingsFile = %q", p.SettingsFile)
 	}
@@ -73,6 +76,9 @@ func TestResolvePathsWindowsPortableByMarker(t *testing.T) {
 	if p.Root != exeDir || p.DataDir != filepath.Join(exeDir, "data") {
 		t.Errorf("portable(marker): Root/DataDir = %q/%q, want %q/%q", p.Root, p.DataDir, exeDir, filepath.Join(exeDir, "data"))
 	}
+	if !p.Portable {
+		t.Error("portable(marker): Portable = false, want true")
+	}
 }
 
 // TestResolvePathsWindowsNonPortable 无 env、无标记 → 走平台用户配置目录。
@@ -81,6 +87,9 @@ func TestResolvePathsWindowsNonPortable(t *testing.T) {
 	p := resolvePaths("windows", fakeEnv(nil), fakeExe(exeDir), fakeCfg("/cfg/winbase"))
 	if p.Root != "/cfg/winbase" || p.DataDir != filepath.Join("/cfg/winbase", "feiwu") {
 		t.Errorf("windows 非便携: Root/DataDir = %q/%q", p.Root, p.DataDir)
+	}
+	if p.Portable {
+		t.Error("非便携: Portable = true, want false")
 	}
 }
 

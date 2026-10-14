@@ -17,11 +17,16 @@ import (
 //	             secret.bin 都在这里)。
 //	SettingsFile DataDir/settings.json。
 //	TasksFile    DataDir/tasks.json(Task 4 的任务上下文)。
+//	Portable     Windows portable 模式(2025 打包配套):true 时 SecretStore
+//	             绕开系统 keyring(凭据管理器按用户存储,不随目录走),
+//	             Cookie 走文件兜底落 DataDir/secret.bin——数据全随
+//	             portable 文件夹带走。
 type Paths struct {
 	Root         string
 	DataDir      string
 	SettingsFile string
 	TasksFile    string
+	Portable     bool
 }
 
 // ResolvePaths 按 G7 定位数据目录,返回各关键文件位置。只定位、不创建
@@ -54,7 +59,9 @@ func resolvePaths(goos string, getenv func(string) string, exeDir, cfgDir func()
 	if goos == "windows" && isPortable(getenv, exeDir) {
 		if exe, err := exeDir(); err == nil && exe != "" {
 			root := filepath.Dir(exe) // exe 同目录
-			return newPaths(root, filepath.Join(root, "data"))
+			p := newPaths(root, filepath.Join(root, "data"))
+			p.Portable = true
+			return p
 		}
 		// exe 路径拿不到(os.Executable 失败的极端情形):退到平台默认,
 		// 不落不确定路径。

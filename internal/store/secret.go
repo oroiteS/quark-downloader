@@ -104,11 +104,16 @@ func NewSecretStore(p Paths) *SecretStore {
 }
 
 // newSecretStore 是可注入实现体:keyring 实现与机器标识可替换,测试离线。
+// Portable 模式(Windows portable 打包配套)起始即 keyringDown=true——
+// keyring 在 Windows 即凭据管理器(按用户存储,不随目录走),portable
+// 语义要求 Cookie 与 settings/tasks 一样落 exe 旁 ./data/,直接走文件
+// 兜底(加密写 DataDir/secret.bin),读写全程不触碰 keyring。
 func newSecretStore(p Paths, kr keyringAPI, hostname, username string) *SecretStore {
 	return &SecretStore{
-		paths: p,
-		kr:    kr,
-		key:   deriveKey(cookieSalt, hostname, username),
+		paths:       p,
+		kr:          kr,
+		key:         deriveKey(cookieSalt, hostname, username),
+		keyringDown: p.Portable,
 	}
 }
 
