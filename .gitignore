@@ -5,3 +5,4 @@ test/
 .worktrees/
 .gocache/
 node_modules/
+.pnpm-store/
