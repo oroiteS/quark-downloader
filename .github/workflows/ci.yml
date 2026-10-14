@@ -1,0 +1,54 @@
+# CI：push/PR 质量门（Go 测试 + 前端测试 + 嵌入产物构建检查）。
+# 打包发布另见 release.yml（tag v* 触发）。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go test
+        run: go test ./...
+
+  web-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm 版本读 web/package.json 的 packageManager 字段（仓库根无 package.json，
+      # 须显式指路）
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: pnpm install
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: vitest
+        working-directory: web
+        run: pnpm test
+
+      - name: typecheck + build（产物直落 internal/webapi/web/dist，验证 embed 契约）
+        working-directory: web
+        run: pnpm build

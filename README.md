@@ -23,6 +23,15 @@ go build -o feiwu ./cmd/feiwu
 
 设置页的「选择目录…」按钮走 `POST /api/fs/pick-dir`：由后端调系统原生目录选择对话框（macOS 访达 / Windows FolderBrowserDialog / Linux zenity）返回绝对路径，未支持平台或对话框命令缺失返回 503 `fs_picker_unsupported`。
 
+## CI 与自动打包
+
+- `.github/workflows/ci.yml`：push main / PR 跑 Go 全量测试、前端测试与嵌入产物构建检查。
+- `.github/workflows/release.yml`：push `v*` tag 自动打包并发布 GitHub Release——
+  Windows portable exe（`feiwu-windows-amd64.exe`，CGO=0 交叉编译）+
+  macOS universal dmg（`feiwu-vX.Y.Z-macos-universal.dmg`，arm64+amd64 双原生构建
+  lipo 合并，内含带图标的 `feiwu.app`）。手动触发（workflow_dispatch）只产出
+  artifacts 不发布。dmg 未签名未公证，首次打开需右键 → 打开。
+
 运行时环境变量（均可选）：
 
 - `FEIWU_PORT`：监听端口，缺省 `127.0.0.1` 随机端口（实际地址打印在启动日志）。
