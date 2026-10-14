@@ -2,7 +2,8 @@
 // - 三态守卫：null=全屏 Spinner 不跳转 / false=重定向 /login / true=放行
 // - 登录态与昵称解耦（T15，校验保守原则）：200 {logged_in:true, nickname:""}
 //   仍视为已登录，昵称/容量照常写入，AccountBadge「夸克用户」占位兜底
-// - D2 导航三项（解析/任务/网盘；设置项取消，入口移至左下角用户菜单）
+// - D2 导航两项（解析/任务；设置入口在左下角用户菜单，网盘页已移除——
+//   只保留分享链接解析下载，后端 /api/drive/* 接口保留不动）
 //   + 当前项 aria-current="page"（NavLink 内建语义）
 // - AccountBadge 长条进度条（环已废弃）：宽度=used/total、<100% 蓝
 //   （primary）、≥100% 红（error 且占满）；"used/totalG" 文本在条下方
@@ -140,18 +141,19 @@ describe('App 登录守卫（三态）', () => {
 });
 
 describe('App D2 布局', () => {
-  it('loggedIn=true：导航三项可见（无设置项）、当前项 aria-current、31/50G 文本在进度条下方', async () => {
+  it('loggedIn=true：导航两项可见（无网盘/设置项）、当前项 aria-current、31/50G 文本在进度条下方', async () => {
     mockAccount(LOGGED_IN_ACCOUNT);
     await probeAccount();
     renderAppAt('/tasks');
 
     const nav = screen.getByRole('navigation', { name: '主导航' });
-    for (const label of ['解析', '任务', '网盘']) {
+    for (const label of ['解析', '任务']) {
       expect(
         within(nav).getByRole('link', { name: label }),
       ).toBeInTheDocument();
     }
-    // 设置不再是导航项（入口移至左下角用户菜单）
+    // 网盘页已移除（只保留分享解析下载）；设置在左下角用户菜单（非链接）
+    expect(within(nav).queryByRole('link', { name: '网盘' })).toBeNull();
     expect(within(nav).queryByRole('link', { name: '设置' })).toBeNull();
     expect(screen.queryByRole('link', { name: '设置' })).toBeNull();
 

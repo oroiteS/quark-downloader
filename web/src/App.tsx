@@ -14,10 +14,10 @@
  *
  * 页面本体按 Task 接管：/login 已由 pages/Login（Task 5）挂载；/（解析）
  * 已由 pages/Parse（Task 6，控制者预授权接线）挂载；/tasks 已由
- * pages/Tasks（Task 7，控制者预授权接线）挂载；/drive 已由 pages/Drive
- * （Task 8，控制者预授权接线）挂载；/settings 已由 pages/Settings
- * （Task 9，控制者预授权接线）挂载。SkipLink 落在 App.tsx（清单未含独立
- * 文件），main.tsx 与测试共同消费。
+ * pages/Tasks（Task 7，控制者预授权接线）挂载；/settings 已由 pages/Settings
+ * （Task 9，控制者预授权接线）挂载。网盘页（/drive）已移除——产品只保留
+ * 分享链接解析下载，后端 /api/drive/* 接口保留未动。SkipLink 落在
+ * App.tsx（清单未含独立文件），main.tsx 与测试共同消费。
  */
 import { Navigate, Outlet, Route, Routes } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -30,7 +30,6 @@ import { Sidebar } from './layout/Sidebar';
 import { Login } from './pages/Login';
 import { Parse } from './pages/Parse';
 import { Tasks } from './pages/Tasks';
-import { Drive } from './pages/Drive';
 import { Settings } from './pages/Settings';
 import './app.css';
 
@@ -116,7 +115,6 @@ export function App() {
         >
           <Route index element={<Parse />} />
           <Route path="tasks" element={<Tasks />} />
-          <Route path="drive" element={<Drive />} />
           <Route path="settings" element={<Settings />} />
         </Route>
         {/* 路由表外路径归位解析页（守卫仍生效，未登录先落登录） */}
