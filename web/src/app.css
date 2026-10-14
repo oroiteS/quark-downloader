@@ -96,6 +96,10 @@
 .account-badge {
   position: relative; /* 弹出菜单锚点 */
   display: grid;
+  /* 轨道钉死容器宽度（真机修复）：默认 auto 轨道会被 nowrap 昵称的
+     min-content 撑破侧栏边界（昵称与进度条同轨一起溢出）；minmax(0,1fr)
+     后昵称由 __name 的 ellipsis 截断，进度条回到侧栏内容宽度内。 */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-1);
   min-width: 0;
   padding: var(--space-2);
