@@ -159,11 +159,14 @@ func run(ctx context.Context, opts ...runOption) error {
 	// （FEIWU_NO_WINDOW=1 或 runner 为 nil）为纯服务端：仅
 	// FEIWU_OPEN_BROWSER=1 显式选择加入时才 openBrowser——未设/非 "1"
 	// 即不调，静默无 warn（不开浏览器是明确意图而非失败）。窗口正常
-	// 关闭（runner 返回 nil）→ cancel 触发收尾链：关窗即退出（Task 7）。
+	// 关闭（runner 返回 nil）或失败（error）→ cancel 触发收尾链：
+	// 失败路径也必须先完成收尾（hub 关闭、srv.Shutdown、app.Close、
+	// join serveDone）再上抛——旧实现失败分支直接 return，server 滞留
+	// serve、端口不下线（T1 评审缺陷，Task 5 修复）。runnerErr 由统一
+	// 出口在收尾完成后返回，正常/信号路径返回值不变。
+	var runnerErr error
 	if cfg.windowRunner != nil && os.Getenv("FEIWU_NO_WINDOW") != "1" {
-		if err := cfg.windowRunner(url); err != nil {
-			return fmt.Errorf("窗口启动失败: %w", err)
-		}
+		runnerErr = cfg.windowRunner(url)
 		cancel()
 	} else if os.Getenv("FEIWU_OPEN_BROWSER") == "1" {
 		if err := openBrowser(url); err != nil {
@@ -173,8 +176,8 @@ func run(ctx context.Context, opts ...runOption) error {
 
 	// 6) 信号驱动优雅关闭（SIGINT/SIGTERM → shutdown → app.Close）。
 	<-ctx.Done()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		srv.Close() // 排空超时：强关兜底
 	}
@@ -184,6 +187,12 @@ func run(ctx context.Context, opts ...runOption) error {
 	app.Close()
 	if err := <-serveDone; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("http serve: %w", err)
+	}
+	if runnerErr != nil {
+		// 窗口启动失败：收尾已全部完成，此处以上抛语义包装返回（降级
+		// 红线：绝不静默吞掉后无界面挂着）。serve 自身的 ErrServerClosed
+		// 已被上方忽略，窗口失败是根因，优先上抛。
+		return fmt.Errorf("窗口启动失败: %w", runnerErr)
 	}
 	slog.Info("feiwu 已退出")
 	return nil

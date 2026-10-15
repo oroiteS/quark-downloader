@@ -408,6 +408,12 @@ func TestRunWindowRunnerCloseTriggersShutdown(t *testing.T) {
 // 层）：窗口运行器返回 error → run 以「窗口启动失败: %w」语义包装上抛
 // （errors.Is 穿透成立），且**立即返回**——绝不静默吞掉后无界面挂着。
 // 平台无关（不触 wails），CI ubuntu 亦可执行。
+//
+// Task 5 失败路径收尾钉死（T1 评审缺陷修复）：返回前必须完成与正常关闭
+// 相同的收尾链（srv.Shutdown → app.Close → join serveDone）——旧实现失
+// 败分支直接 return，server 滞留 serve、端口不下线。run 返回本身即
+// serveDone 已 join 的证据（返回前 join），端口下线再证一层（沿
+// TestRunWindowRunnerCloseTriggersShutdown 的双证据手法）。
 func TestRunWindowRunnerErrorWrapped(t *testing.T) {
 	t.Setenv("FEIWU_NO_BROWSER", "1")
 	t.Setenv("FEIWU_DATA_DIR", t.TempDir())
@@ -415,10 +421,20 @@ func TestRunWindowRunnerErrorWrapped(t *testing.T) {
 	sentinel := errors.New("wails 假想失败")
 	opt := withWindowRunner(func(string) error { return sentinel })
 
+	ready := make(chan string, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, opt) }()
+	go func() { done <- run(ctx, opt, withOnReady(func(addr string) { ready <- addr })) }()
+
+	var addr string
+	select {
+	case addr = <-ready:
+	case err := <-done:
+		t.Fatalf("run 在就绪前退出: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run 启动超时（未就绪）")
+	}
 
 	select {
 	case err := <-done:
@@ -433,6 +449,63 @@ func TestRunWindowRunnerErrorWrapped(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("windowRunner 失败后 run 未返回（进程活着但无界面）")
+	}
+
+	// 失败路径收尾已执行的证据：监听端口真正下线（禁用 keep-alive 复用）。
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	if resp, err := client.Get(addr + "/api/health"); err == nil {
+		resp.Body.Close()
+		t.Fatal("windowRunner 失败返回后端口仍可访问（失败路径未走收尾链）")
+	}
+}
+
+// TestRunWindowModeSignalCancelTriggersShutdown Task 5 信号链窗口模式
+// 钉死：窗口模式装配 + 外部 signal ctx 取消（SIGINT/SIGTERM 等价）→
+// run 返回 nil 且收尾链执行。fakeRunner 模拟 newWailsRunner 的信号接
+// 线形态（<-ctx.Done() → runtime.Quit 关窗 → wails.Run 返回 nil），
+// 与 TestRunWindowRunnerCloseTriggersShutdown（关窗路径：退出动力来自
+// runner 自行返回）互补——两条路径共用同一收尾链，本测试显式钉死信号
+// 路径不会与关窗路径将来分叉。
+func TestRunWindowModeSignalCancelTriggersShutdown(t *testing.T) {
+	t.Setenv("FEIWU_NO_BROWSER", "1")
+	t.Setenv("FEIWU_DATA_DIR", t.TempDir())
+
+	ready := make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opt := withWindowRunner(func(string) error {
+		<-ctx.Done() // 信号 ctx 取消 → 关窗（wails.Run 返回 nil 等价）
+		return nil
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, opt, withOnReady(func(addr string) { ready <- addr })) }()
+
+	var addr string
+	select {
+	case addr = <-ready:
+	case err := <-done:
+		t.Fatalf("run 在就绪前退出: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run 启动超时（未就绪）")
+	}
+
+	// SIGINT 等价：外部 ctx 取消 → runner 关窗返回 → run 走收尾链。
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("信号取消后 run 返回错误: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("信号取消后 run 未返回（信号路径收尾链未执行）")
+	}
+
+	// 收尾已执行的额外证据：监听端口真正下线（禁用 keep-alive 复用）。
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	if resp, err := client.Get(addr + "/api/health"); err == nil {
+		resp.Body.Close()
+		t.Fatal("信号取消 run 返回后端口仍可访问（收尾链未执行）")
 	}
 }
 

@@ -119,6 +119,17 @@ func TestBuildAppOptionsOnBeforeClose(t *testing.T) {
 			t.Fatal("用户确认 OnBeforeClose = true, 期望 false（进程退出）")
 		}
 	})
+	t.Run("hasActiveTasks 为 nil 防御放行", func(t *testing.T) {
+		called := false
+		confirmClose = func(context.Context) bool { called = true; return true }
+		opt := buildAppOptions("http://127.0.0.1:45678", nil)
+		if prevent := opt.OnBeforeClose(context.Background()); prevent {
+			t.Fatal("hasActiveTasks == nil OnBeforeClose = true, 期望 false（防御短路放行关闭）")
+		}
+		if called {
+			t.Fatal("hasActiveTasks == nil 仍调用了确认函数（防御短路缺失）")
+		}
+	})
 }
 
 // TestNewWailsRunnerEmptyURL 空 serverURL 校验：runner 以空串调用直接
