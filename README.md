@@ -1,6 +1,6 @@
 # 飞舞 (feiwu)
 
-夸克网盘下载器（Go 实现）。
+夸克网盘下载器（Go 实现），基于 [gezi-quark-downloader](https://github.com/huaotem-bot/gezi-quark-downloader) 二次开发。仅支持登录后下载分享链接的文件，不支持下载网盘内文件与获取直链。
 
 ## 安装
 
@@ -107,7 +107,3 @@ FEIWU_NO_WINDOW=1 go run ./cmd/feiwu
 
 避免：改变小猪的任何细节、姿势或表情；画面出现文字、字母、数字或水印；加入边框、渐变、纹理、杂点或其他背景元素。
 ```
-
-## 参考仓库
-
-本项目参考仓库：<https://github.com/huaotem-bot/gezi-quark-downloader>
