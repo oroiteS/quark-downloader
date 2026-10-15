@@ -130,8 +130,8 @@ func bootRedirectHandler(serverURL string) http.Handler {
 // newWailsRunner 窗口运行器（main 装配处 withWindowRunner(newWailsRunner(
 // signalCtx, hasActiveTasks)) 接线）：阻塞运行 wails 窗口直到关闭，
 // wails.Run 的 error 原样透传。非桌面平台（!darwin && !windows）由
-// window_other.go 提供对称 nil 空位，run 落回无窗口模式的 openBrowser
-// 回退。
+// window_other.go 提供对称 nil 空位，run 落入无窗口模式（纯服务端，
+// 浏览器仅按 FEIWU_OPEN_BROWSER=1 可选开启）。
 //
 // ctx 为 main 的 signal.NotifyContext（SIGINT/SIGTERM）：run 阻塞在
 // wails.Run 里收不到信号 ctx 取消，故 runner 内起 goroutine 接线——

@@ -40,7 +40,17 @@ go build -o feiwu ./cmd/feiwu
 
 - `FEIWU_PORT`：监听端口，缺省 `127.0.0.1` 随机端口（实际地址打印在启动日志）。
 - `FEIWU_DATA_DIR`：数据目录，优先级最高；缺省走平台默认目录（Windows 另有 portable 判据）。
-- `FEIWU_NO_BROWSER=1`：跳过启动后自动打开浏览器（无头/测试环境用）。
+- `FEIWU_NO_WINDOW=1`：无窗口模式（纯服务端），仅 `=1` 时生效；桌面默认打开 Wails 原生窗口。
+- `FEIWU_OPEN_BROWSER=1`：无窗口模式下启动后自动打开浏览器（窗口模式下忽略，不跳浏览器）。
+- `FEIWU_NO_BROWSER=1`：**已废弃**（保留兼容，仅无窗口模式生效）：跳过浏览器打开。
+
+行为矩阵：
+
+| 条件 | 行为 |
+|------|------|
+| 默认（桌面） | Wails 窗口，无浏览器 |
+| `FEIWU_NO_WINDOW=1` | 纯服务端 + 按 `FEIWU_OPEN_BROWSER` 决定是否 open |
+| 窗口初始化失败 | slog.Error + 非零退出（不 fallback 浏览器） |
 
 ## App 图标
 

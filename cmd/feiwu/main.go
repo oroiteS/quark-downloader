@@ -1,5 +1,7 @@
 // feiwu 主程序装配：数据目录/设置/秘钥（store）→ webapi.App → gin
-// server → rlimit 自提 → 监听 → 自动开浏览器 → ctx 取消优雅退出。
+// server → rlimit 自提 → 监听 → Wails 原生窗口（默认，无浏览器）→
+// ctx 取消优雅退出；无窗口模式（FEIWU_NO_WINDOW=1 / 非桌面）纯服务端，
+// 仅 FEIWU_OPEN_BROWSER=1 时可选开浏览器（Task 3 行为矩阵）。
 //
 // 系列 3/5（store + Web API）的装配主干：run(ctx) 只做装配与生命周期，
 // 应用态全部收敛在 webapi.App（后续 restoreSession/restoreTasks/引擎
@@ -39,8 +41,9 @@ type runConfig struct {
 	// 经此回调拿 app 延迟解析（跨 goroutine 读靠 atomic 容器）。
 	onApp func(*webapi.App)
 	// windowRunner 窗口运行器（Task 2 wails 注入）：server 监听成功后
-	// 被调用，阻塞直到窗口关闭；返回 error 视为窗口失败。nil（默认）→
-	// 无窗口模式（现状行为）。FEIWU_NO_WINDOW=1 优先级高于它。
+	// 被调用，阻塞直到窗口关闭；返回 error 视为窗口失败。nil（非桌面
+	// 平台）→ 无窗口模式：纯服务端，浏览器仅按 FEIWU_OPEN_BROWSER
+	// 可选开启（Task 3）。FEIWU_NO_WINDOW=1 优先级高于它。
 	windowRunner func(serverURL string) error
 }
 
@@ -62,8 +65,10 @@ func withWindowRunner(f func(serverURL string) error) runOption {
 //
 //	store.ResolvePaths（G7）→ LoadSettings/SecretStore → webapi.New →
 //	app.Start（restore 钩子，当前空位）→ rlimit 自提 → 监听（端口写
-//	日志）→ 自动开浏览器（G8）→ <-ctx.Done() → srv.Shutdown（OnShutdown
-//	先行关闭 SSE hub）→ app.Close → join serve goroutine（无泄漏）。
+//	日志）→ 窗口/浏览器分支（窗口为主路径；无窗口模式为纯服务端，
+//	仅 FEIWU_OPEN_BROWSER=1 时开浏览器，Task 3）→ <-ctx.Done() →
+//	srv.Shutdown（OnShutdown 先行关闭 SSE hub）→ app.Close → join
+//	serve goroutine（无泄漏）。
 //
 // 返回前 join serveDone：run 返回 ⇒ serve goroutine 已退出。
 func run(ctx context.Context, opts ...runOption) error {
@@ -148,17 +153,22 @@ func run(ctx context.Context, opts ...runOption) error {
 		cfg.onReady(url)
 	}
 
-	// 5) 窗口/浏览器分支：注入了窗口运行器且未设 FEIWU_NO_WINDOW →
-	// 阻塞运行窗口直到关闭（返回 error 视为窗口失败）；否则退回旧的
-	// 自动开浏览器（G8）——失败仅记日志，绝不影响服务。窗口正常关闭
-	// （runner 返回 nil）→ cancel 触发收尾链：关窗即退出（Task 7）。
+	// 5) 窗口/浏览器分支（Task 3 行为矩阵）：窗口为主路径——注入了窗口
+	// 运行器且未设 FEIWU_NO_WINDOW → 阻塞运行窗口直到关闭；返回 error
+	// 视为窗口失败，包装上抛、绝不 fallback 浏览器。无窗口模式
+	// （FEIWU_NO_WINDOW=1 或 runner 为 nil）为纯服务端：仅
+	// FEIWU_OPEN_BROWSER=1 显式选择加入时才 openBrowser——未设/非 "1"
+	// 即不调，静默无 warn（不开浏览器是明确意图而非失败）。窗口正常
+	// 关闭（runner 返回 nil）→ cancel 触发收尾链：关窗即退出（Task 7）。
 	if cfg.windowRunner != nil && os.Getenv("FEIWU_NO_WINDOW") != "1" {
 		if err := cfg.windowRunner(url); err != nil {
 			return fmt.Errorf("窗口启动失败: %w", err)
 		}
 		cancel()
-	} else if err := openBrowser(url); err != nil {
-		slog.Warn("自动开浏览器失败", "err", err)
+	} else if os.Getenv("FEIWU_OPEN_BROWSER") == "1" {
+		if err := openBrowser(url); err != nil {
+			slog.Warn("自动开浏览器失败", "err", err)
+		}
 	}
 
 	// 6) 信号驱动优雅关闭（SIGINT/SIGTERM → shutdown → app.Close）。
@@ -187,8 +197,10 @@ func listenAddr() string {
 	return net.JoinHostPort("127.0.0.1", "0")
 }
 
-// openBrowser 自动开浏览器（G8）：FEIWU_NO_BROWSER=1 跳过（测试/无头
-// 环境约定）；其余走平台打开。
+// openBrowser 无窗口模式可选的浏览器打开（G8 起家，Task 3 起调用时机
+// 由 run 的行为矩阵门控：仅无窗口模式且 FEIWU_OPEN_BROWSER=1）。
+// FEIWU_NO_BROWSER=1 跳过（已废弃开关，保留兼容，仅无窗口模式生效）；
+// 其余走平台打开。
 func openBrowser(url string) error {
 	if os.Getenv("FEIWU_NO_BROWSER") == "1" {
 		return nil
@@ -215,11 +227,12 @@ var launchBrowser = func(url string) error {
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	// 窗口装配（Task 2）：默认 Wails 原生窗口——直接打开见窗口，不再跳
+	// 窗口装配（Task 2）：默认 Wails 原生窗口——直接打开见窗口，不跳
 	// 浏览器；server 监听成功后才开窗（先监听、拿到真实地址、再开窗口，
 	// 消除「窗口打开但 404」竞态）。FEIWU_NO_WINDOW=1 或非 darwin/windows
-	// （runner 为 nil）→ 旧无窗口行为（openBrowser 回退）；测试一律注入
-	// fakeRunner，绝不真开窗口。
+	// （runner 为 nil）→ 无窗口模式：纯服务端，仅 FEIWU_OPEN_BROWSER=1
+	// 时 openBrowser（Task 3 行为矩阵）；测试一律注入 fakeRunner，绝不
+	// 真开窗口。
 	//
 	// Task 7：signal ctx 直通 newWailsRunner（SIGINT/SIGTERM → runtime.Quit
 	// 关窗口 → run 收尾链）；HasActiveTasks 跨函数延迟解析——app 建于 run
