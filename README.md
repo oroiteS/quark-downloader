@@ -2,6 +2,19 @@
 
 夸克网盘下载器（Go 实现）。技术选型与核心算法原理见 [docs/](docs/)。
 
+## 安装
+
+Homebrew（macOS）：
+
+```bash
+brew install --cask oroiteS/tap/feiwu
+```
+
+也可从 [Releases](https://github.com/oroiteS/quark-downloader/releases) 手动下载：
+
+- macOS：`feiwu-vX.Y.Z-macos-universal.dmg`（未签名，首次打开需右键 → 打开）
+- Windows：`feiwu-windows-amd64-portable.zip`（解压即用）
+
 ## 构建与开发
 
 前端源码在 [web/](web/)（React + Vite，pnpm 管理）：
@@ -94,3 +107,7 @@ FEIWU_NO_WINDOW=1 go run ./cmd/feiwu
 
 避免：改变小猪的任何细节、姿势或表情；画面出现文字、字母、数字或水印；加入边框、渐变、纹理、杂点或其他背景元素。
 ```
+
+## 参考仓库
+
+本项目参考仓库：<https://github.com/huaotem-bot/gezi-quark-downloader>
