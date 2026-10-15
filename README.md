@@ -9,7 +9,7 @@
 ```bash
 cd web
 pnpm install          # 安装依赖
-pnpm dev              # 开发服务器，/api 代理到 127.0.0.1:8080 的后端
+pnpm dev              # 开发服务器，/api 代理到 127.0.0.1:45678 的后端
 pnpm test             # 全量测试（Vitest）
 pnpm build            # 先跑 typecheck（prebuild 链），产物直落 internal/webapi/web/dist
 ```
@@ -20,6 +20,8 @@ pnpm build            # 先跑 typecheck（prebuild 链），产物直落 intern
 go build -o feiwu ./cmd/feiwu
 ./feiwu
 ```
+
+dev 模式前后端缺省端口已对齐（45678），`pnpm dev` + `go run ./cmd/feiwu` 双端都不再需要设 `FEIWU_PORT`。
 
 设置页的「选择目录…」按钮走 `POST /api/fs/pick-dir`：由后端调系统原生目录选择对话框（macOS 访达 / Windows FolderBrowserDialog / Linux zenity）返回绝对路径，未支持平台或对话框命令缺失返回 503 `fs_picker_unsupported`。
 
@@ -38,7 +40,7 @@ go build -o feiwu ./cmd/feiwu
 
 运行时环境变量（均可选）：
 
-- `FEIWU_PORT`：监听端口，缺省 `127.0.0.1` 随机端口（实际地址打印在启动日志）。
+- `FEIWU_PORT`：监听端口，缺省 `127.0.0.1:45678`（固定高位，端口占用时自动回退随机端口并在启动日志告警；显式指定被占则启动报错）。实际地址打印在启动日志。
 - `FEIWU_DATA_DIR`：数据目录，优先级最高；缺省走平台默认目录（Windows 另有 portable 判据）。
 - `FEIWU_NO_WINDOW=1`：无窗口模式（纯服务端），仅 `=1` 时生效；桌面默认打开 Wails 原生窗口。
 - `FEIWU_OPEN_BROWSER=1`：无窗口模式下启动后自动打开浏览器（窗口模式下忽略，不跳浏览器）。

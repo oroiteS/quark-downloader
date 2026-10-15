@@ -7,10 +7,11 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   // dev 代理（简报 Interfaces）：本地 `pnpm dev` 时 /api 转发到 gin
-  // （FEIWU_PORT=8080 启动后端）；build 产物同源直连，不经此代理。
+  // （后端缺省监听 127.0.0.1:45678，Task 6 起双端默认对齐，dev 不再
+  // 需要设 FEIWU_PORT）；build 产物同源直连，不经此代理。
   server: {
     proxy: {
-      '/api': 'http://127.0.0.1:8080',
+      '/api': 'http://127.0.0.1:45678',
     },
   },
   build: {

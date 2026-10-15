@@ -134,10 +134,18 @@ func run(ctx context.Context, opts ...runOption) error {
 		slog.Info("fd 上限已自提", "before", before, "after", after)
 	}
 
-	// 4) 监听：默认 127.0.0.1:0（随机端口写日志；FEIWU_PORT 可配——设置
-	// 无端口字段，端口仅 env 可配是设计取舍）。
+	// 4) 监听：默认固定高位 127.0.0.1:45678（Task 6 端口红线——窗口模式
+	// 与 vite dev 代理需要可预期的固定端口）；FEIWU_PORT 可配且覆盖一切
+	// （设置无端口字段，端口仅 env 可配是设计取舍）。缺省路径被占 →
+	// Warn 告警后以 127.0.0.1:0 回退重试一次（不静默漂移）；env 显式
+	// 指定的端口被占 → 维持报错退出（用户显式指定的失败不许静默换口）。
 	addr := listenAddr()
 	ln, err := net.Listen("tcp", addr)
+	if err != nil && os.Getenv("FEIWU_PORT") == "" {
+		slog.Warn("默认端口 45678 被占,回退随机端口", "err", err)
+		addr = "127.0.0.1:0"
+		ln, err = net.Listen("tcp", addr)
+	}
 	if err != nil {
 		return fmt.Errorf("监听 %s: %w", addr, err)
 	}
@@ -198,12 +206,13 @@ func run(ctx context.Context, opts ...runOption) error {
 	return nil
 }
 
-// listenAddr 监听地址：FEIWU_PORT 可配；缺省 127.0.0.1:0（随机端口写日志）。
+// listenAddr 监听地址：FEIWU_PORT 可配（覆盖一切）；缺省固定高位
+// 127.0.0.1:45678（被占时由 run 回退随机并告警，Task 6 端口红线）。
 func listenAddr() string {
 	if p := os.Getenv("FEIWU_PORT"); p != "" {
 		return net.JoinHostPort("127.0.0.1", p)
 	}
-	return net.JoinHostPort("127.0.0.1", "0")
+	return net.JoinHostPort("127.0.0.1", "45678")
 }
 
 // openBrowser 无窗口模式可选的浏览器打开（G8 起家，Task 3 起调用时机

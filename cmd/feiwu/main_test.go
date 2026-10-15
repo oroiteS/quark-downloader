@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -126,20 +129,85 @@ func TestResolvePathsSmoke(t *testing.T) {
 	})
 }
 
-// TestListenAddr 监听地址：FEIWU_PORT 可配，缺省随机端口（127.0.0.1:0）。
-func TestListenAddr(t *testing.T) {
-	t.Run("FEIWU_PORT 指定端口", func(t *testing.T) {
-		t.Setenv("FEIWU_PORT", "18080")
-		if got, want := listenAddr(), "127.0.0.1:18080"; got != want {
-			t.Fatalf("listenAddr() = %q, 期望 %q", got, want)
+// TestListenAddrDefaultFixedHighPort Task 6 端口红线：无 FEIWU_PORT 时
+// listenAddr 返回固定高位 127.0.0.1:45678（不再随机）。
+func TestListenAddrDefaultFixedHighPort(t *testing.T) {
+	t.Setenv("FEIWU_PORT", "")
+	if got, want := listenAddr(), "127.0.0.1:45678"; got != want {
+		t.Fatalf("listenAddr() = %q, 期望 %q", got, want)
+	}
+}
+
+// TestListenAddrEnvOverride Task 6：FEIWU_PORT 显式指定仍覆盖一切
+// （env 优先级不变，45678 只是缺省）。
+func TestListenAddrEnvOverride(t *testing.T) {
+	t.Setenv("FEIWU_PORT", "8080")
+	if got, want := listenAddr(), "127.0.0.1:8080"; got != want {
+		t.Fatalf("listenAddr() = %q, 期望 %q", got, want)
+	}
+}
+
+// TestRunPortOccupiedFallsBackRandom Task 6 端口红线：45678 被占（测试
+// 先占住）→ run 必须落回随机端口（实际地址经 onReady 缝可见：非 45678
+// 且 127.0.0.1 前缀），且日志含 Warn「默认端口 45678 被占,回退随机端口」
+// ——回退不许静默漂移。
+func TestRunPortOccupiedFallsBackRandom(t *testing.T) {
+	t.Setenv("FEIWU_NO_BROWSER", "1")
+	t.Setenv("FEIWU_DATA_DIR", t.TempDir())
+	t.Setenv("FEIWU_PORT", "")
+
+	// 先占住 45678（占不住多半是端口已被其他进程占用——前提同样成立，
+	// 记日志继续即可）。
+	if ln, err := net.Listen("tcp", "127.0.0.1:45678"); err == nil {
+		defer ln.Close()
+	} else {
+		t.Logf("预占 45678 失败（端口可能已被占，前提仍成立）: %v", err)
+	}
+
+	// 捕获 slog 输出断言 Warn（回退必须告警）。测试顺序执行、不并行，
+	// 换全局 default logger 安全；断言在 run 返回之后（channel 同步，
+	// 无数据竞争）。
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	ready := make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, withOnReady(func(addr string) { ready <- addr })) }()
+
+	var addr string
+	select {
+	case addr = <-ready:
+	case err := <-done:
+		t.Fatalf("run 在就绪前退出（45678 被占未回退？）: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run 启动超时（未就绪）")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ctx 取消后 run 返回错误: %v", err)
 		}
-	})
-	t.Run("缺省随机端口", func(t *testing.T) {
-		t.Setenv("FEIWU_PORT", "")
-		if got, want := listenAddr(), "127.0.0.1:0"; got != want {
-			t.Fatalf("listenAddr() = %q, 期望 %q", got, want)
-		}
-	})
+	case <-time.After(5 * time.Second):
+		t.Fatal("ctx 取消后 run 未退出")
+	}
+
+	// 实际地址：非 45678（随机回退生效）且 127.0.0.1 前缀。
+	if strings.HasSuffix(addr, ":45678") {
+		t.Fatalf("实际监听地址 = %q, 45678 被占时应回退随机端口", addr)
+	}
+	if !strings.HasPrefix(addr, "http://127.0.0.1:") {
+		t.Fatalf("实际监听地址 = %q, 期望 http://127.0.0.1:<port> 形式", addr)
+	}
+
+	// 日志含回退 Warn。
+	if !strings.Contains(buf.String(), "默认端口 45678 被占,回退随机端口") {
+		t.Fatalf("日志缺「默认端口 45678 被占,回退随机端口」Warn, 实际输出:\n%s", buf.String())
+	}
 }
 
 // TestRunWithWindowRunner 注入窗口运行器：收到完整 server URL、阻塞
