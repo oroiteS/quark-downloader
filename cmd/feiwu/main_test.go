@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -255,6 +256,38 @@ func TestRunNoWindowEnvSuppressesRunner(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("FEIWU_NO_WINDOW=1 时未回退 openBrowser（旧行为丢失）")
+	}
+}
+
+// TestRunWindowRunnerErrorWrapped 降级红线（Review Focus ④，fakeRunner
+// 层）：窗口运行器返回 error → run 以「窗口启动失败: %w」语义包装上抛
+// （errors.Is 穿透成立），且**立即返回**——绝不静默吞掉后无界面挂着。
+// 平台无关（不触 wails），CI ubuntu 亦可执行。
+func TestRunWindowRunnerErrorWrapped(t *testing.T) {
+	t.Setenv("FEIWU_NO_BROWSER", "1")
+	t.Setenv("FEIWU_DATA_DIR", t.TempDir())
+
+	sentinel := errors.New("wails 假想失败")
+	opt := withWindowRunner(func(string) error { return sentinel })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, opt) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("windowRunner 返回 error 但 run 返回 nil（静默吞错，无界面挂着）")
+		}
+		if !strings.Contains(err.Error(), "窗口启动失败") {
+			t.Fatalf("run 错误 = %q, 期望包含「窗口启动失败」包装", err)
+		}
+		if !errors.Is(err, sentinel) {
+			t.Fatalf("run 错误 = %v, 期望以 %%w 包装 sentinel（errors.Is 穿透）", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("windowRunner 失败后 run 未返回（进程活着但无界面）")
 	}
 }
 

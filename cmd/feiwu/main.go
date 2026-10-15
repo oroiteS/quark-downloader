@@ -192,7 +192,12 @@ var launchBrowser = func(url string) error {
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx); err != nil {
+	// 窗口装配（Task 2）：默认 Wails 原生窗口——直接打开见窗口，不再跳
+	// 浏览器；server 监听成功后才开窗（先监听、拿到真实地址、再开窗口，
+	// 消除「窗口打开但 404」竞态）。FEIWU_NO_WINDOW=1 或非 darwin/windows
+	// （runner 为 nil）→ 旧无窗口行为（openBrowser 回退）；测试一律注入
+	// fakeRunner，绝不真开窗口。
+	if err := run(ctx, withWindowRunner(newWailsRunner())); err != nil {
 		slog.Error("feiwu 异常退出", "err", err)
 		os.Exit(1)
 	}
