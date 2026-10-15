@@ -6,3 +6,4 @@ test/
 .gocache/
 node_modules/
 .pnpm-store/
+.gomodcache/

@@ -5,7 +5,7 @@
 // bootstrap 让进程拥有完整 NSApplication 生命周期，是 macOS Dock 弹跳
 // 的根治点。
 //
-// ⚠️ 接口偏差记录（待控制器裁决）：计划/brief 假定的
+// 接口偏差记录（已裁决采纳，302 首跳方案）：计划/brief 假定的
 // options.App{URL: serverURL} 字段在 wails v2 全版本线不存在
 // （v2.0.0→v2.16.0 的 pkg/options/options.go 均无 URL 字段，生产路径
 // app_production.go 亦无任何启动 URL 注入口）。此处采用的等价机制：
@@ -22,15 +22,25 @@
 // 降级红线：wails.Run 返回 error 原样透传（run 包装为「窗口启动失败:
 // %w」→ main 转 slog.Error + 非零退出），绝不静默吞掉后无界面挂着。
 // wails.Run 本体不可 headless 测试；可测装配面：buildAppOptions 的
-// 窗口参数与首跳 302 组装、newWailsRunner 存在性（window_test.go）。
+// 窗口参数、首跳 302 组装、OnBeforeClose 三分支（confirmClose 注入）、
+// newWailsRunner 空地址校验与存在性（window_test.go）。
+//
+// Task 7 关窗行为（需求方裁决，双平台一致）：关窗即退出——无活动任务
+// 直接放行；有 pending/running 任务弹「您还有任务未完成，确定关闭软件
+// 吗？」，取消留在窗口、确认退出进程。不做托盘/最小化驻留。
 package main
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // wailsConfig 窗口装配参数（计划冻结值的载体，buildAppOptions 消费）。
@@ -51,11 +61,45 @@ func defaultWailsConfig() wailsConfig {
 	}
 }
 
+// confirmClose 关窗确认（Task 7，包级可注入变量——测试替换，defer 恢复；
+// 与 launchBrowser 同一注入模式）。语义：返回 true = 放行关闭（用户确认
+// 退出进程）；false = 阻止（用户取消，窗口保留）。
+//
+// 默认实现 runtime.MessageDialog + QuestionDialog：title「飞舞」，文案
+// 逐字「您还有任务未完成，确定关闭软件吗？」。跨平台返回语义（wails
+// v2.16.0 实际行为）：Windows 端 QuestionDialog 固定 MB_YESNO 两键，
+// 返回 "Yes"/"No"（internal/frontend/desktop/windows/dialog.go:196）；
+// macOS 端返回被点按钮的 label（desktop/darwin/dialog.go:176）——
+// Buttons 提供 macOS 的两个按钮，判定取两平台白名单并集。弹框失败
+// 保守策略：返回 false 阻止关闭——宁可让用户再按一次关窗，也绝不因
+// 弹框故障误杀下载任务；未知返回值（空串等）同判。
+var confirmClose = func(ctx context.Context) bool {
+	selected, err := runtime.MessageDialog(ctx, runtime.MessageDialogOptions{
+		Type:          runtime.QuestionDialog,
+		Title:         "飞舞",
+		Message:       "您还有任务未完成，确定关闭软件吗？",
+		Buttons:       []string{"退出", "取消"},
+		DefaultButton: "取消",
+		CancelButton:  "取消",
+	})
+	if err != nil {
+		slog.Warn("关窗确认弹框失败（保守阻止关闭）", "err", err)
+		return false
+	}
+	return selected == "Yes" || selected == "退出"
+}
+
 // buildAppOptions 生成 wails 启动选项（包内可测装配面）：窗口参数取计
 // 划冻结值；StartHidden 显式 false——启动即见窗口（本计划目标：直接打
 // 开 app 即见界面）；AssetServer 仅提供「302 → serverURL」首跳，server
 // URL 原样直传不拼路径，路由全部由真实 HTTP 端口承载（机制见文件头）。
-func buildAppOptions(serverURL string) *options.App {
+//
+// hasActiveTasks 为 webapi.App.HasActiveTasks 的延迟解析闭包（Task 7）：
+// OnBeforeClose 无活动任务返回 false 直接放行；有活动任务经 confirmClose
+// 确认——确认放行（false）、取消阻止（true）。OnBeforeClose 在 wails
+// 事件循环 goroutine 执行，闭包内跨 goroutine 读取的 app 引用由装配方
+// （main）以 atomic 保证可见性。
+func buildAppOptions(serverURL string, hasActiveTasks func() bool) *options.App {
 	cfg := defaultWailsConfig()
 	return &options.App{
 		Title:       cfg.title,
@@ -65,6 +109,12 @@ func buildAppOptions(serverURL string) *options.App {
 		MinHeight:   cfg.minHeight,
 		StartHidden: false,
 		AssetServer: &assetserver.Options{Handler: bootRedirectHandler(serverURL)},
+		OnBeforeClose: func(ctx context.Context) bool {
+			if hasActiveTasks == nil || !hasActiveTasks() {
+				return false // 无活动任务：直接放行关闭
+			}
+			return !confirmClose(ctx) // 确认退出 → false 放行；取消 → true 阻止
+		},
 	}
 }
 
@@ -77,12 +127,42 @@ func bootRedirectHandler(serverURL string) http.Handler {
 	})
 }
 
-// newWailsRunner 窗口运行器（main 装配处 withWindowRunner(newWailsRunner())
-// 接线）：阻塞运行 wails 窗口直到关闭，wails.Run 的 error 原样透传。
-// 非桌面平台（!darwin && !windows）由 window_other.go 提供 nil 空位，
-// run 落回无窗口模式的 openBrowser 回退。
-func newWailsRunner() func(string) error {
+// newWailsRunner 窗口运行器（main 装配处 withWindowRunner(newWailsRunner(
+// signalCtx, hasActiveTasks)) 接线）：阻塞运行 wails 窗口直到关闭，
+// wails.Run 的 error 原样透传。非桌面平台（!darwin && !windows）由
+// window_other.go 提供对称 nil 空位，run 落回无窗口模式的 openBrowser
+// 回退。
+//
+// ctx 为 main 的 signal.NotifyContext（SIGINT/SIGTERM）：run 阻塞在
+// wails.Run 里收不到信号 ctx 取消，故 runner 内起 goroutine 接线——
+// <-ctx.Done() → runtime.Quit(wailsCtx) 关窗口，使 wails.Run 返回、
+// run 走关窗收尾链。wailsCtx 由 OnStartup 存入（atomic.Value 跨
+// goroutine 可见）；信号早于窗口 startup 到达的窗口期由 OnStartup 内
+// 的 ctx.Err() 复查补齐。ctx == nil 时（测试/防御）不接线。
+//
+// serverURL 空串直接返回 error：窗口首跳 302 无目标地址，绝不产生
+// 相对 Location。
+func newWailsRunner(ctx context.Context, hasActiveTasks func() bool) func(string) error {
 	return func(serverURL string) error {
-		return wails.Run(buildAppOptions(serverURL))
+		if serverURL == "" {
+			return errors.New("serverURL 为空：窗口首跳地址缺失，拒绝开窗（避免相对 Location）")
+		}
+		var wailsCtx atomic.Value // context.Context；OnStartup 写，信号 goroutine 读
+		opts := buildAppOptions(serverURL, hasActiveTasks)
+		opts.OnStartup = func(c context.Context) {
+			wailsCtx.Store(c)
+			if ctx != nil && ctx.Err() != nil {
+				runtime.Quit(c) // 信号早于 startup 到达：立即关窗走收尾
+			}
+		}
+		if ctx != nil {
+			go func() {
+				<-ctx.Done()
+				if c, ok := wailsCtx.Load().(context.Context); ok {
+					runtime.Quit(c)
+				}
+			}()
+		}
+		return wails.Run(opts)
 	}
 }

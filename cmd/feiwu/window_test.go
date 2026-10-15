@@ -16,6 +16,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,7 +25,7 @@ import (
 // TestBuildAppOptionsWindowParams 计划冻结的窗口参数逐字核对：
 // 标题「飞舞」，1280×832，最小 960×600，StartHidden: false。
 func TestBuildAppOptionsWindowParams(t *testing.T) {
-	opt := buildAppOptions("http://127.0.0.1:45678")
+	opt := buildAppOptions("http://127.0.0.1:45678", nil)
 	if opt.Title != "飞舞" {
 		t.Fatalf("Title = %q, 期望 %q", opt.Title, "飞舞")
 	}
@@ -53,7 +54,7 @@ func TestBuildAppOptionsURLDirect(t *testing.T) {
 		"http://127.0.0.1:45678", // 默认端口形态（Task 6 后）
 		"http://127.0.0.1:0",     // 理论不出现，验证不做改写
 	} {
-		srv := httptest.NewServer(buildAppOptions(serverURL).AssetServer.Handler)
+		srv := httptest.NewServer(buildAppOptions(serverURL, nil).AssetServer.Handler)
 		resp, err := client.Get(srv.URL + "/")
 		srv.Close()
 		if err != nil {
@@ -70,11 +71,65 @@ func TestBuildAppOptionsURLDirect(t *testing.T) {
 }
 
 // TestNewWailsRunnerAssembly 装配面存在性：newWailsRunner 返回非 nil
-// 的 func(string) error（main 装配处 withWindowRunner(newWailsRunner())
-// 的消费形态）；不调用它——调用即 wails.Run 真开窗口。
+// 的 func(string) error（main 装配处 withWindowRunner(newWailsRunner(ctx,
+// hasActiveTasks)) 的消费形态）；不调用它——调用即 wails.Run 真开窗口。
 func TestNewWailsRunnerAssembly(t *testing.T) {
-	r := newWailsRunner()
+	r := newWailsRunner(nil, nil)
 	if r == nil {
 		t.Fatal("newWailsRunner() = nil, 期望非 nil 窗口运行器（darwin/windows 桌面构建）")
+	}
+}
+
+// TestBuildAppOptionsOnBeforeClose 关窗确认三分支（Task 7；真弹框不可
+// headless 测试，confirmClose 包级变量注入替换——真弹框人工验收归 Task 4）：
+// ①无活动任务 → 返回 false 放行且确认函数未被调用；
+// ②有活动任务 + confirmClose 返回 false（用户取消）→ 返回 true 阻止（窗口保留）；
+// ③有活动任务 + confirmClose 返回 true（用户确认退出）→ 返回 false 放行（进程退出）。
+func TestBuildAppOptionsOnBeforeClose(t *testing.T) {
+	origConfirm := confirmClose
+	defer func() { confirmClose = origConfirm }()
+	inactive := func() bool { return false }
+	active := func() bool { return true }
+
+	t.Run("无活动任务放行且不弹框", func(t *testing.T) {
+		called := false
+		confirmClose = func(context.Context) bool { called = true; return true }
+		opt := buildAppOptions("http://127.0.0.1:45678", inactive)
+		if opt.OnBeforeClose == nil {
+			t.Fatal("OnBeforeClose 未接线（关窗确认缺失）")
+		}
+		if prevent := opt.OnBeforeClose(context.Background()); prevent {
+			t.Fatal("无活动任务 OnBeforeClose = true, 期望 false（直接放行关闭）")
+		}
+		if called {
+			t.Fatal("无活动任务仍调用了确认函数（应短路放行）")
+		}
+	})
+	t.Run("用户取消阻止关闭", func(t *testing.T) {
+		confirmClose = func(context.Context) bool { return false }
+		opt := buildAppOptions("http://127.0.0.1:45678", active)
+		if prevent := opt.OnBeforeClose(context.Background()); !prevent {
+			t.Fatal("用户取消 OnBeforeClose = false, 期望 true（窗口保留）")
+		}
+	})
+	t.Run("用户确认放行退出", func(t *testing.T) {
+		confirmClose = func(context.Context) bool { return true }
+		opt := buildAppOptions("http://127.0.0.1:45678", active)
+		if prevent := opt.OnBeforeClose(context.Background()); prevent {
+			t.Fatal("用户确认 OnBeforeClose = true, 期望 false（进程退出）")
+		}
+	})
+}
+
+// TestNewWailsRunnerEmptyURL 空 serverURL 校验：runner 以空串调用直接
+// 返回 error——绝不进入 wails.Run（本测试空串短路，安全不开窗），更不得
+// 让首跳 302 产生相对 Location。
+func TestNewWailsRunnerEmptyURL(t *testing.T) {
+	r := newWailsRunner(nil, nil)
+	if r == nil {
+		t.Fatal("newWailsRunner = nil")
+	}
+	if err := r(""); err == nil {
+		t.Fatal("空 serverURL 未返回 error（相对 Location 风险）")
 	}
 }

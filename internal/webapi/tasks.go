@@ -561,6 +561,21 @@ func (a *App) tasksSnapshot() []taskDTO {
 	return out
 }
 
+// HasActiveTasks 关窗确认判据（Task 7，wails OnBeforeClose 消费）：
+// 快照中存在 State ∈ {pending, running} 条目即 true。合并阶段（Merging
+// = true）引擎 State 仍报 running，无需单判；paused/done/error/canceled
+// 及 exists/needs_reparse/finished 等终态/标注态不算。manager 未装配
+// （a.manager == nil）走 taskDTOFromCtx 的 fallback 终态语义，恒 false
+// 不 panic——与 GET /api/tasks 完全同源，无第二套判定。
+func (a *App) HasActiveTasks() bool {
+	for _, d := range a.tasksSnapshot() {
+		if d.State == "pending" || d.State == "running" {
+			return true
+		}
+	}
+	return false
+}
+
 // taskDTOFromCtx 单条 TaskCtx → DTO。
 func (a *App) taskDTOFromCtx(tc store.TaskCtx) taskDTO {
 	d := taskDTO{

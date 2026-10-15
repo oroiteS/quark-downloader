@@ -187,15 +187,17 @@ func TestRunWithWindowRunner(t *testing.T) {
 		t.Fatal("windowRunner 未被调用（监听成功后未触发窗口）")
 	}
 
-	// ctx 取消模拟窗口关闭 → run 返回 nil。
+	// Task 7 起 runner 返回 nil 即触发 run 内 cancel 自行收口（下方
+	// TestRunWindowRunnerCloseTriggersShutdown 专测）；此处 cancel() 对
+	// 外部 signal ctx 的取消此时已是 no-op，select done 仅兜底。
 	cancel()
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("ctx 取消后 run 返回错误: %v", err)
+			t.Fatalf("窗口关闭后 run 返回错误: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("ctx 取消后 run 未退出（serve goroutine 泄漏或挂起）")
+		t.Fatal("窗口关闭后 run 未退出（serve goroutine 泄漏或挂起）")
 	}
 }
 
@@ -256,6 +258,51 @@ func TestRunNoWindowEnvSuppressesRunner(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("FEIWU_NO_WINDOW=1 时未回退 openBrowser（旧行为丢失）")
+	}
+}
+
+// TestRunWindowRunnerCloseTriggersShutdown Task 7 关窗退出收口：窗口
+// runner 返回 nil（窗口关闭）→ run 不得滞留在信号等待（旧缺陷：窗口关
+// 了进程不退），须直接走收尾链（srv.Shutdown → app.Close → join serve）
+// 并返回 nil。外部 signal ctx 全程未取消——退出动力只能来自 run 内的
+// 关窗 cancel。run 返回本身即收尾完成的证据（返回前 join serveDone），
+// 端口下线再证一层。
+func TestRunWindowRunnerCloseTriggersShutdown(t *testing.T) {
+	t.Setenv("FEIWU_NO_BROWSER", "1")
+	t.Setenv("FEIWU_DATA_DIR", t.TempDir())
+
+	ready := make(chan string, 1)
+	opt := withWindowRunner(func(string) error { return nil })
+
+	ctx, cancel := context.WithCancel(context.Background()) // 外部 ctx 保持未取消
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, opt, withOnReady(func(addr string) { ready <- addr })) }()
+
+	var addr string
+	select {
+	case addr = <-ready:
+	case err := <-done:
+		t.Fatalf("run 在就绪前退出: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run 启动超时（未就绪）")
+	}
+
+	// runner 返回 nil → run 自行收口（不依赖外部 ctx 取消）。
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("窗口关闭后 run 返回错误: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("窗口关闭后 run 未返回（关窗不退出的旧缺陷仍在）")
+	}
+
+	// 收尾已执行的额外证据：监听端口真正下线（禁用 keep-alive 复用）。
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	if resp, err := client.Get(addr + "/api/health"); err == nil {
+		resp.Body.Close()
+		t.Fatal("run 返回后端口仍可访问（收尾链未执行）")
 	}
 }
 

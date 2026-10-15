@@ -1368,6 +1368,66 @@ func TestTaskRetryRevivesEvicted(t *testing.T) {
 	})
 }
 
+// ---- ⑮ Task 7：HasActiveTasks 关窗确认判据 ----
+
+// TestAppHasActiveTasks 关窗确认判据（wails OnBeforeClose 消费）：
+// ①快照含 running / pending → true（Merging 阶段引擎 State 仍报 running，
+// 无需单判）；②仅 paused/done/error/canceled 或空列表 → false；
+// ③manager 未装配 → 走 taskDTOFromCtx 的 fallback 终态语义，false 且
+// 不 panic。全部走 fakeManager 注入（tasks_test.go 既有模式）。
+func TestAppHasActiveTasks(t *testing.T) {
+	seed := func(t *testing.T, paths store.Paths, settings store.Settings) {
+		t.Helper()
+		store.SaveTasks(paths, []store.TaskCtx{
+			{EngineID: "t1", FileName: "a.bin", FID: "f1",
+				Dest: filepath.Join(settings.DestDir, "a.bin"), Size: 10, Mode: "a"},
+		})
+	}
+	t.Run("running/pending → true", func(t *testing.T) {
+		for _, state := range []string{"running", "pending"} {
+			paths := taskTestPaths(t)
+			settings := taskTestSettings(filepath.Join(paths.DataDir, "dl"))
+			fm := &fakeManager{gets: map[string]engine.Progress{
+				"t1": {State: state},
+			}}
+			app := newTasksTestApp(t, &fakeUpstream{}, fm, settings, paths)
+			seed(t, paths, settings)
+			if !app.HasActiveTasks() {
+				t.Fatalf("State=%q 时 HasActiveTasks() = false, 期望 true", state)
+			}
+		}
+	})
+	t.Run("终态/空列表 → false", func(t *testing.T) {
+		for _, state := range []string{"paused", "done", "error", "canceled"} {
+			paths := taskTestPaths(t)
+			settings := taskTestSettings(filepath.Join(paths.DataDir, "dl"))
+			fm := &fakeManager{gets: map[string]engine.Progress{
+				"t1": {State: state},
+			}}
+			app := newTasksTestApp(t, &fakeUpstream{}, fm, settings, paths)
+			seed(t, paths, settings)
+			if app.HasActiveTasks() {
+				t.Fatalf("State=%q 时 HasActiveTasks() = true, 期望 false", state)
+			}
+		}
+		paths := taskTestPaths(t)
+		app := newTasksTestApp(t, &fakeUpstream{}, &fakeManager{},
+			taskTestSettings(filepath.Join(paths.DataDir, "dl")), paths)
+		if app.HasActiveTasks() {
+			t.Fatal("空任务列表 HasActiveTasks() = true, 期望 false")
+		}
+	})
+	t.Run("manager 未装配 → false 不 panic", func(t *testing.T) {
+		paths := taskTestPaths(t)
+		settings := taskTestSettings(filepath.Join(paths.DataDir, "dl"))
+		app := New(Deps{Paths: paths, Settings: settings}) // manager == nil
+		seed(t, paths, settings)
+		if app.HasActiveTasks() {
+			t.Fatal("manager 未装配 HasActiveTasks() = true, 期望 false（fallback 终态）")
+		}
+	})
+}
+
 // ---- ⑭ Mode 落盘读回（裁决 3 接线）----
 
 // TestCreateTasksPersistsMode 创建链落盘 TaskCtx.Mode（"a"/"b"），GET
