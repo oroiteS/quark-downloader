@@ -141,6 +141,123 @@ func TestListenAddr(t *testing.T) {
 	})
 }
 
+// TestRunWithWindowRunner 注入窗口运行器：收到完整 server URL、阻塞
+// 返回后 run 正常收尾（Task 1 窗口注入点验收）。
+func TestRunWithWindowRunner(t *testing.T) {
+	t.Setenv("FEIWU_NO_BROWSER", "1")       // 实现若误走 openBrowser 分支也不得真开浏览器
+	t.Setenv("FEIWU_DATA_DIR", t.TempDir()) // 隔离数据目录（ResolvePaths 真实定位）
+
+	got := make(chan string, 1)
+	opt := withWindowRunner(func(serverURL string) error {
+		got <- serverURL
+		return nil
+	})
+
+	ready := make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, opt, withOnReady(func(addr string) { ready <- addr }))
+	}()
+
+	var addr string
+	select {
+	case addr = <-ready:
+	case err := <-done:
+		t.Fatalf("run 在就绪前退出: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run 启动超时（未就绪）")
+	}
+
+	// 断言：runner 收到 "http://127.0.0.1:<port>" 完整 URL（与 onReady
+	// 收到的同一 URL——run 两者传同值）。
+	select {
+	case serverURL := <-got:
+		if serverURL != addr {
+			t.Fatalf("windowRunner 收到 %q, 与 onReady 的 %q 不一致", serverURL, addr)
+		}
+		if !strings.HasPrefix(serverURL, "http://127.0.0.1:") {
+			t.Fatalf("windowRunner 收到 %q, 期望 http://127.0.0.1:<port> 形式", serverURL)
+		}
+	case err := <-done:
+		t.Fatalf("windowRunner 调用前 run 已退出: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("windowRunner 未被调用（监听成功后未触发窗口）")
+	}
+
+	// ctx 取消模拟窗口关闭 → run 返回 nil。
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ctx 取消后 run 返回错误: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ctx 取消后 run 未退出（serve goroutine 泄漏或挂起）")
+	}
+}
+
+// TestRunNoWindowEnvSuppressesRunner FEIWU_NO_WINDOW=1：设置了
+// windowRunner 也不得调用（headless 不崩），且退回旧的自动开浏览器
+// 行为——无窗口模式下行为与现状完全一致。
+func TestRunNoWindowEnvSuppressesRunner(t *testing.T) {
+	t.Setenv("FEIWU_NO_WINDOW", "1")
+	t.Setenv("FEIWU_DATA_DIR", t.TempDir())
+	orig := launchBrowser
+	defer func() { launchBrowser = orig }()
+	browserGot := make(chan string, 1)
+	launchBrowser = func(u string) error { browserGot <- u; return nil }
+
+	got := make(chan string, 1)
+	opt := withWindowRunner(func(serverURL string) error {
+		got <- serverURL
+		return nil
+	})
+
+	ready := make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, opt, withOnReady(func(addr string) { ready <- addr }))
+	}()
+
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("run 在就绪前退出: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run 启动超时（未就绪）")
+	}
+
+	// ctx 取消（no-window 下 runner 非阻塞，run 正常走到信号等待）。
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ctx 取消后 run 返回错误: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ctx 取消后 run 未退出")
+	}
+
+	// run 返回后再断言：runner 从未被调用；openBrowser 分支照旧执行。
+	select {
+	case serverURL := <-got:
+		t.Fatalf("FEIWU_NO_WINDOW=1 时 windowRunner 仍被调用, serverURL=%q", serverURL)
+	default:
+	}
+	select {
+	case u := <-browserGot:
+		if !strings.HasPrefix(u, "http://127.0.0.1:") {
+			t.Fatalf("无窗口回退 openBrowser 收到 %q, 期望 http://127.0.0.1:<port> 形式", u)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("FEIWU_NO_WINDOW=1 时未回退 openBrowser（旧行为丢失）")
+	}
+}
+
 // TestOpenBrowser 自动开浏览器（G8）：FEIWU_NO_BROWSER=1 跳过；默认走
 // 平台打开（launchBrowser 可注入，测试绝不真开浏览器）。
 func TestOpenBrowser(t *testing.T) {

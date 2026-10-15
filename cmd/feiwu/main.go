@@ -32,12 +32,20 @@ const shutdownTimeout = 5 * time.Second
 // runConfig run 的可注入点（测试用）；零值即生产路径。
 type runConfig struct {
 	onReady func(addr string) // 监听就绪回调（测试拿实际端口）
+	// windowRunner 窗口运行器（Task 2 wails 注入）：server 监听成功后
+	// 被调用，阻塞直到窗口关闭；返回 error 视为窗口失败。nil（默认）→
+	// 无窗口模式（现状行为）。FEIWU_NO_WINDOW=1 优先级高于它。
+	windowRunner func(serverURL string) error
 }
 
 type runOption func(*runConfig)
 
 func withOnReady(f func(addr string)) runOption {
 	return func(c *runConfig) { c.onReady = f }
+}
+
+func withWindowRunner(f func(serverURL string) error) runOption {
+	return func(c *runConfig) { c.windowRunner = f }
 }
 
 // run 核心装配与生命周期（main 可测试化的全部逻辑）：
@@ -119,8 +127,14 @@ func run(ctx context.Context, opts ...runOption) error {
 		cfg.onReady(url)
 	}
 
-	// 5) 自动开浏览器（G8）：失败仅记日志，绝不影响服务。
-	if err := openBrowser(url); err != nil {
+	// 5) 窗口/浏览器分支：注入了窗口运行器且未设 FEIWU_NO_WINDOW →
+	// 阻塞运行窗口直到关闭（返回 error 视为窗口失败）；否则退回旧的
+	// 自动开浏览器（G8）——失败仅记日志，绝不影响服务。
+	if cfg.windowRunner != nil && os.Getenv("FEIWU_NO_WINDOW") != "1" {
+		if err := cfg.windowRunner(url); err != nil {
+			return fmt.Errorf("窗口启动失败: %w", err)
+		}
+	} else if err := openBrowser(url); err != nil {
 		slog.Warn("自动开浏览器失败", "err", err)
 	}
 
