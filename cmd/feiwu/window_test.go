@@ -5,7 +5,7 @@
 //
 //  1. buildAppOptions 的窗口参数（计划冻结值：标题「飞舞」，1280×832，
 //     最小 960×600，StartHidden: false）；
-//  2. URL 直传语义——窗口首跳 302 的 Location 与 server 完整 URL 逐字
+//  2. URL 直传语义——首跳 HTML 导航页中的目标 URL 与 server 完整 URL 逐字
 //     一致，不拼任何路径/锚点（SSE /api/events 依赖真实 HTTP 端口，
 //     不走 assetserver 接管路由；首跳机制见 window.go 文件头偏差记录）；
 //  3. newWailsRunner 装配面存在且非 nil（注入 run 的 closure 形态）。
@@ -17,9 +17,11 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -41,14 +43,17 @@ func TestBuildAppOptionsWindowParams(t *testing.T) {
 	}
 }
 
-// TestBuildAppOptionsURLDirect URL 直传（不拼路径）：窗口首跳 302 的
-// Location 必须与 server 完整 URL 逐字一致——多一个 '/' 都会让 SSE/
-// 静态资源走上歧路，也偏离「窗口直连 http://127.0.0.1:<port>」的约束。
-// 首跳经 buildAppOptions 产物的 AssetServer.Handler 验证（httptest 层）。
+// TestBuildAppOptionsURLDirect URL 直传（不拼路径）：首跳 handler 返回的
+// 必须是一页 200 的 HTML 导航页（Content-Type text/html），body 中的目标
+// URL 与 serverURL 逐字一致。不走 HTTP 302——darwin 资产响应经
+// WKURLSchemeHandler 投递，不解析 HTTP 重定向语义，真机实证 302 body
+// 「Found.」被当普通内容渲染成白屏（机制见 window.go bootRedirectHandler）。
+// URL 多一个 '/' 都会让 SSE/静态资源走上歧路。首跳经 buildAppOptions
+// 产物的 AssetServer.Handler 验证（httptest 层）。
 func TestBuildAppOptionsURLDirect(t *testing.T) {
 	client := &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse // 不跟随，取 302 本体断言
+			return http.ErrUseLastResponse // 防跟随：直接断言首跳页本体
 		},
 	}
 	for _, serverURL := range []string{
@@ -61,12 +66,22 @@ func TestBuildAppOptionsURLDirect(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET 首跳 handler: %v", err)
 		}
+		body, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusFound {
-			t.Fatalf("首跳状态码 = %d, 期望 302", resp.StatusCode)
+		if readErr != nil {
+			t.Fatalf("读首跳 body: %v", readErr)
 		}
-		if loc := resp.Header.Get("Location"); loc != serverURL {
-			t.Fatalf("首跳 Location = %q, 期望原样直传 %q（不拼路径）", loc, serverURL)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("首跳状态码 = %d, 期望 200（HTML 导航页，非 HTTP 重定向）", resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+			t.Fatalf("首跳 Content-Type = %q, 期望 text/html", ct)
+		}
+		if !strings.Contains(string(body), serverURL) {
+			t.Fatalf("首跳页 body 未含目标 URL %q, body: %s", serverURL, body)
+		}
+		if strings.Contains(string(body), serverURL+"/") {
+			t.Fatalf("首跳页 URL 被拼了路径, 期望逐字 %q, body: %s", serverURL, body)
 		}
 	}
 }
@@ -147,7 +162,7 @@ func TestBuildAppOptionsOnBeforeCloseWiring(t *testing.T) {
 
 // TestNewWailsRunnerEmptyURL 空 serverURL 校验：runner 以空串调用直接
 // 返回 error——绝不进入 wails.Run（本测试空串短路，安全不开窗），更不得
-// 让首跳 302 产生相对 Location。
+// 让首跳导航页在无目标地址时产出。
 func TestNewWailsRunnerEmptyURL(t *testing.T) {
 	r := newWailsRunner(nil, nil)
 	if r == nil {

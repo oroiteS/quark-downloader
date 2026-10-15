@@ -5,16 +5,17 @@
 // bootstrap 让进程拥有完整 NSApplication 生命周期，是 macOS Dock 弹跳
 // 的根治点。
 //
-// 接口偏差记录（已裁决采纳，302 首跳方案）：计划/brief 假定的
+// 接口偏差记录（已裁决采纳，首跳 HTML 导航方案）：计划/brief 假定的
 // options.App{URL: serverURL} 字段在 wails v2 全版本线不存在
 // （v2.0.0→v2.16.0 的 pkg/options/options.go 均无 URL 字段，生产路径
 // app_production.go 亦无任何启动 URL 注入口）。此处采用的等价机制：
 //
-//	AssetServer{Assets: nil, Handler: 302→serverURL}
+//	AssetServer{Assets: nil, Handler: HTML 导航页→serverURL}
 //
 // assetserver 官方语义（pkg/options/assetserver/options.go:15）：
-// Assets 为 nil 时所有 GET 转发 Handler → 窗口首跳 302 到真实 server。
-// 此后 WebView 全部请求直连 http://127.0.0.1:<port>（Windows 端
+// Assets 为 nil 时所有 GET 转发 Handler → 窗口首跳到真实 server
+// （首跳不走 HTTP 302 的原因见 bootRedirectHandler）。此后 WebView
+// 全部请求直连 http://127.0.0.1:<port>（Windows 端
 // frontend.go processRequest 对非 startURL host 的请求原样放行给
 // WebView2；macOS 端 WKWebView 无导航拦截 delegate）——assetserver
 // 不接管任何路由，SSE /api/events 仍由真实 HTTP 端口承载，红线守住。
@@ -22,7 +23,7 @@
 // 降级红线：wails.Run 返回 error 原样透传（run 包装为「窗口启动失败:
 // %w」→ main 转 slog.Error + 非零退出），绝不静默吞掉后无界面挂着。
 // wails.Run 本体不可 headless 测试；可测装配面：buildAppOptions 的
-// 窗口参数、首跳 302 组装、OnBeforeClose 接线与弹框参数
+// 窗口参数、首跳导航页组装、OnBeforeClose 接线与弹框参数
 // （closeConfirmDialogOptions，window_test.go）；关窗确认三分支判定与
 // 默认键平台映射已下沉平台无关纯函数（window_logic.go +
 // window_logic_test.go，无 build tag，CI ubuntu 可编译执行）。
@@ -35,6 +36,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	stdruntime "runtime"
@@ -109,8 +111,8 @@ func closeConfirmDialogOptions() runtime.MessageDialogOptions {
 
 // buildAppOptions 生成 wails 启动选项（包内可测装配面）：窗口参数取计
 // 划冻结值；StartHidden 显式 false——启动即见窗口（本计划目标：直接打
-// 开 app 即见界面）；AssetServer 仅提供「302 → serverURL」首跳，server
-// URL 原样直传不拼路径，路由全部由真实 HTTP 端口承载（机制见文件头）。
+// 开 app 即见界面）；AssetServer 仅提供「HTML 导航页 → serverURL」首跳，
+// server URL 原样直传不拼路径，路由全部由真实 HTTP 端口承载（机制见文件头）。
 //
 // hasActiveTasks 为 webapi.App.HasActiveTasks 的延迟解析闭包（Task 7）：
 // OnBeforeClose 无活动任务返回 false 直接放行；有活动任务经 confirmClose
@@ -136,12 +138,19 @@ func buildAppOptions(serverURL string, hasActiveTasks func() bool) *options.App 
 	}
 }
 
-// bootRedirectHandler 窗口首跳处理器：任意 GET → 302 Location: serverURL。
-// serverURL 原样直传（http.Redirect 会做 URL 转义但不改变目标语义），
-// WebView 跟随重定向后 origin 即为本地 server。
+// bootRedirectHandler 窗口首跳处理器：输出一页立即导航到 serverURL 的
+// HTML（meta refresh + JS location.replace 双保险）。不用 302——darwin
+// 资产响应经 WKURLSchemeHandler 投递，不解析 HTTP 重定向语义，真机实证
+// 302 body「Found.」被当普通内容渲染成白屏；meta refresh/JS 是标准导航，
+// 双平台一致。serverURL 来自 ln.Addr() 构造的 http://127.0.0.1:<port>，
+// 不含 HTML 特殊字符，逐字嵌入不转义；原样直传不拼路径，路由全部由真实
+// HTTP 端口承载。
 func bootRedirectHandler(serverURL string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, serverURL, http.StatusFound)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8">`+
+			`<meta http-equiv="refresh" content="0;url=%s">`+
+			`<script>location.replace(%q)</script></head><body></body></html>`, serverURL, serverURL)
 	})
 }
 
@@ -158,12 +167,11 @@ func bootRedirectHandler(serverURL string) http.Handler {
 // goroutine 可见）；信号早于窗口 startup 到达的窗口期由 OnStartup 内
 // 的 ctx.Err() 复查补齐。ctx == nil 时（测试/防御）不接线。
 //
-// serverURL 空串直接返回 error：窗口首跳 302 无目标地址，绝不产生
-// 相对 Location。
+// serverURL 空串直接返回 error：窗口首跳无目标地址，拒绝开窗。
 func newWailsRunner(ctx context.Context, hasActiveTasks func() bool) func(string) error {
 	return func(serverURL string) error {
 		if serverURL == "" {
-			return errors.New("serverURL 为空：窗口首跳地址缺失，拒绝开窗（避免相对 Location）")
+			return errors.New("serverURL 为空：窗口首跳地址缺失，拒绝开窗")
 		}
 		var wailsCtx atomic.Value // context.Context；OnStartup 写，信号 goroutine 读
 		opts := buildAppOptions(serverURL, hasActiveTasks)
