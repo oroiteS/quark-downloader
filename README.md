@@ -14,7 +14,7 @@ pnpm test             # 全量测试（Vitest）
 pnpm build            # 先跑 typecheck（prebuild 链），产物直落 internal/webapi/web/dist
 ```
 
-后端为 Go 单二进制，前端产物经 `//go:embed`（internal/webapi/static.go）打进二进制。桌面直接运行即打开 Wails 原生窗口；窗口模式构建需 `-tags production`（Wails 硬要求，缺 tag 时窗口拒绝启动并报错退出）：
+后端为 Go 单二进制，前端产物经 `//go:embed`（internal/webapi/static.go）打进二进制。桌面直接运行即打开 Wails 原生窗口；窗口模式构建需 `-tags production`（Wails 硬要求，缺 tag 时窗口拒绝启动：macOS 报错并以非零码退出，Windows 弹英文错误框后无窗口静默退出）：
 
 ```bash
 go build -tags production -o feiwu ./cmd/feiwu
@@ -57,6 +57,7 @@ FEIWU_NO_WINDOW=1 go run ./cmd/feiwu
 | 默认（桌面） | Wails 窗口，无浏览器 |
 | `FEIWU_NO_WINDOW=1` | 纯服务端 + 按 `FEIWU_OPEN_BROWSER` 决定是否 open |
 | 窗口初始化失败 | slog.Error + 非零退出（不 fallback 浏览器） |
+| Ctrl-C / SIGTERM | 直接退出，不弹关窗确认（信号即显式退出意图，信号路径不经 OnBeforeClose） |
 
 ## App 图标
 

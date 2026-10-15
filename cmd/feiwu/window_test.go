@@ -19,6 +19,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 )
 
@@ -70,6 +71,40 @@ func TestBuildAppOptionsURLDirect(t *testing.T) {
 	}
 }
 
+// TestCloseConfirmDialogOptionsDefaultButton 关窗确认弹框参数装配
+// （评审第 1 项，平台 tag 内）：冻结值不动（Title/Message/Buttons/
+// CancelButton），DefaultButton 按本平台断言——保守策略「回车≠退出」：
+// darwin 期望 "取消"（回车=取消=留窗）；windows 期望小写 "no"
+// （wails 仅在 ToLower(DefaultButton)=="no" 时设 MB_DEFBUTTON2，
+// 回车=No=不退出；此前固定 "取消" 在 Windows 静默不生效）。
+// 全平台映射表见 window_logic_test.go 的 TestDefaultCloseConfirmButton。
+func TestCloseConfirmDialogOptionsDefaultButton(t *testing.T) {
+	opts := closeConfirmDialogOptions()
+	if opts.Title != "飞舞" {
+		t.Fatalf("Title = %q, 期望 %q", opts.Title, "飞舞")
+	}
+	if opts.Message != "您还有任务未完成，确定关闭软件吗？" {
+		t.Fatalf("Message = %q, 期望计划冻结文案", opts.Message)
+	}
+	if len(opts.Buttons) != 2 || opts.Buttons[0] != "退出" || opts.Buttons[1] != "取消" {
+		t.Fatalf("Buttons = %v, 期望 [退出 取消]", opts.Buttons)
+	}
+	if opts.CancelButton != "取消" {
+		t.Fatalf("CancelButton = %q, 期望 %q", opts.CancelButton, "取消")
+	}
+	var want string
+	switch runtime.GOOS {
+	case "windows":
+		want = "no"
+	default:
+		want = "取消"
+	}
+	if opts.DefaultButton != want {
+		t.Fatalf("DefaultButton = %q, 期望 %q（GOOS=%s，保守策略回车≠退出）",
+			opts.DefaultButton, want, runtime.GOOS)
+	}
+}
+
 // TestNewWailsRunnerAssembly 装配面存在性：newWailsRunner 返回非 nil
 // 的 func(string) error（main 装配处 withWindowRunner(newWailsRunner(ctx,
 // hasActiveTasks)) 的消费形态）；不调用它——调用即 wails.Run 真开窗口。
@@ -80,56 +115,34 @@ func TestNewWailsRunnerAssembly(t *testing.T) {
 	}
 }
 
-// TestBuildAppOptionsOnBeforeClose 关窗确认三分支（Task 7；真弹框不可
-// headless 测试，confirmClose 包级变量注入替换——真弹框人工验收归 Task 4）：
-// ①无活动任务 → 返回 false 放行且确认函数未被调用；
-// ②有活动任务 + confirmClose 返回 false（用户取消）→ 返回 true 阻止（窗口保留）；
-// ③有活动任务 + confirmClose 返回 true（用户确认退出）→ 返回 false 放行（进程退出）。
-func TestBuildAppOptionsOnBeforeClose(t *testing.T) {
+// TestBuildAppOptionsOnBeforeCloseWiring OnBeforeClose 接线（评审第 3 项
+// 下沉后的剩余平台面）：三分支判定的核心断言已迁平台无关
+// （window_logic_test.go 的 TestShouldPreventClose，CI ubuntu 可编译执行），
+// 此处只守装配面——OnBeforeClose 已接线、hasActiveTasks/confirmClose
+// 原样注入 shouldPreventClose、OnBeforeClose 收到的 ctx 透传给
+// confirmClose（真实弹框 ctx 消费者，透传断裂会让弹框失去窗口归属）。
+func TestBuildAppOptionsOnBeforeCloseWiring(t *testing.T) {
 	origConfirm := confirmClose
 	defer func() { confirmClose = origConfirm }()
-	inactive := func() bool { return false }
-	active := func() bool { return true }
 
-	t.Run("无活动任务放行且不弹框", func(t *testing.T) {
-		called := false
-		confirmClose = func(context.Context) bool { called = true; return true }
-		opt := buildAppOptions("http://127.0.0.1:45678", inactive)
-		if opt.OnBeforeClose == nil {
-			t.Fatal("OnBeforeClose 未接线（关窗确认缺失）")
-		}
-		if prevent := opt.OnBeforeClose(context.Background()); prevent {
-			t.Fatal("无活动任务 OnBeforeClose = true, 期望 false（直接放行关闭）")
-		}
-		if called {
-			t.Fatal("无活动任务仍调用了确认函数（应短路放行）")
-		}
-	})
-	t.Run("用户取消阻止关闭", func(t *testing.T) {
-		confirmClose = func(context.Context) bool { return false }
-		opt := buildAppOptions("http://127.0.0.1:45678", active)
-		if prevent := opt.OnBeforeClose(context.Background()); !prevent {
-			t.Fatal("用户取消 OnBeforeClose = false, 期望 true（窗口保留）")
-		}
-	})
-	t.Run("用户确认放行退出", func(t *testing.T) {
-		confirmClose = func(context.Context) bool { return true }
-		opt := buildAppOptions("http://127.0.0.1:45678", active)
-		if prevent := opt.OnBeforeClose(context.Background()); prevent {
-			t.Fatal("用户确认 OnBeforeClose = true, 期望 false（进程退出）")
-		}
-	})
-	t.Run("hasActiveTasks 为 nil 防御放行", func(t *testing.T) {
-		called := false
-		confirmClose = func(context.Context) bool { called = true; return true }
-		opt := buildAppOptions("http://127.0.0.1:45678", nil)
-		if prevent := opt.OnBeforeClose(context.Background()); prevent {
-			t.Fatal("hasActiveTasks == nil OnBeforeClose = true, 期望 false（防御短路放行关闭）")
-		}
-		if called {
-			t.Fatal("hasActiveTasks == nil 仍调用了确认函数（防御短路缺失）")
-		}
-	})
+	type wiringCtxKey struct{}
+	called := false
+	var gotCtx context.Context
+	confirmClose = func(ctx context.Context) bool { called = true; gotCtx = ctx; return false }
+	opt := buildAppOptions("http://127.0.0.1:45678", func() bool { return true })
+	if opt.OnBeforeClose == nil {
+		t.Fatal("OnBeforeClose 未接线（关窗确认缺失）")
+	}
+	ctx := context.WithValue(context.Background(), wiringCtxKey{}, "probe")
+	if prevent := opt.OnBeforeClose(ctx); !prevent {
+		t.Fatal("有活动任务 + 用户取消 OnBeforeClose = false, 期望 true（取消应阻止关闭）")
+	}
+	if !called {
+		t.Fatal("有活动任务未调用确认函数（confirmClose 注入断裂）")
+	}
+	if gotCtx != ctx {
+		t.Fatal("confirmClose 未收到 OnBeforeClose 的 ctx（透传断裂）")
+	}
 }
 
 // TestNewWailsRunnerEmptyURL 空 serverURL 校验：runner 以空串调用直接

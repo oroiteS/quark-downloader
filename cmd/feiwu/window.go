@@ -22,8 +22,10 @@
 // 降级红线：wails.Run 返回 error 原样透传（run 包装为「窗口启动失败:
 // %w」→ main 转 slog.Error + 非零退出），绝不静默吞掉后无界面挂着。
 // wails.Run 本体不可 headless 测试；可测装配面：buildAppOptions 的
-// 窗口参数、首跳 302 组装、OnBeforeClose 三分支（confirmClose 注入）、
-// newWailsRunner 空地址校验与存在性（window_test.go）。
+// 窗口参数、首跳 302 组装、OnBeforeClose 接线与弹框参数
+// （closeConfirmDialogOptions，window_test.go）；关窗确认三分支判定与
+// 默认键平台映射已下沉平台无关纯函数（window_logic.go +
+// window_logic_test.go，无 build tag，CI ubuntu 可编译执行）。
 //
 // Task 7 关窗行为（需求方裁决，双平台一致）：关窗即退出——无活动任务
 // 直接放行；有 pending/running 任务弹「您还有任务未完成，确定关闭软件
@@ -35,6 +37,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	stdruntime "runtime"
 	"sync/atomic"
 
 	"github.com/wailsapp/wails/v2"
@@ -74,19 +77,34 @@ func defaultWailsConfig() wailsConfig {
 // 保守策略：返回 false 阻止关闭——宁可让用户再按一次关窗，也绝不因
 // 弹框故障误杀下载任务；未知返回值（空串等）同判。
 var confirmClose = func(ctx context.Context) bool {
-	selected, err := runtime.MessageDialog(ctx, runtime.MessageDialogOptions{
-		Type:          runtime.QuestionDialog,
-		Title:         "飞舞",
-		Message:       "您还有任务未完成，确定关闭软件吗？",
-		Buttons:       []string{"退出", "取消"},
-		DefaultButton: "取消",
-		CancelButton:  "取消",
-	})
+	selected, err := runtime.MessageDialog(ctx, closeConfirmDialogOptions())
 	if err != nil {
 		slog.Warn("关窗确认弹框失败（保守阻止关闭）", "err", err)
 		return false
 	}
 	return selected == "Yes" || selected == "退出"
+}
+
+// closeConfirmDialogOptions 关窗确认弹框参数（纯函数装配面，可测）：
+// Type/Title/Message/Buttons/CancelButton 计划冻结值不动；DefaultButton
+// 经 defaultCloseConfirmButton（window_logic.go，平台无关映射）按 GOOS
+// 分支，守住「回车≠退出」的保守策略：
+//
+//   - darwin："取消" → 回车=取消=留在窗口；
+//   - windows：小写 "no" → 命中 wails MB_DEFBUTTON2，回车=No=不退出
+//     （此前固定 "取消" 在 Windows 端静默不生效，属本修复点）。
+//
+// 全平台映射表断言见 window_logic_test.go；本平台断言见
+// window_test.go 的 TestCloseConfirmDialogOptionsDefaultButton。
+func closeConfirmDialogOptions() runtime.MessageDialogOptions {
+	return runtime.MessageDialogOptions{
+		Type:          runtime.QuestionDialog,
+		Title:         "飞舞",
+		Message:       "您还有任务未完成，确定关闭软件吗？",
+		Buttons:       []string{"退出", "取消"},
+		DefaultButton: defaultCloseConfirmButton(stdruntime.GOOS),
+		CancelButton:  "取消",
+	}
 }
 
 // buildAppOptions 生成 wails 启动选项（包内可测装配面）：窗口参数取计
@@ -110,10 +128,10 @@ func buildAppOptions(serverURL string, hasActiveTasks func() bool) *options.App 
 		StartHidden: false,
 		AssetServer: &assetserver.Options{Handler: bootRedirectHandler(serverURL)},
 		OnBeforeClose: func(ctx context.Context) bool {
-			if hasActiveTasks == nil || !hasActiveTasks() {
-				return false // 无活动任务：直接放行关闭
-			}
-			return !confirmClose(ctx) // 确认退出 → false 放行；取消 → true 阻止
+			// 三分支判定已下沉平台无关（window_logic.go 的
+			// shouldPreventClose，CI ubuntu 可测）；此处仅把 ctx 包进
+			// confirmClose 闭包完成注入。
+			return shouldPreventClose(hasActiveTasks, func() bool { return confirmClose(ctx) })
 		},
 	}
 }
