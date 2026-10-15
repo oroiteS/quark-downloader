@@ -7,11 +7,16 @@
 #   3. workflow_dispatch    → 仅打包出 artifacts，不发布
 # 产物：
 #   - Windows：portable zip（exe + feiwu.portable 标记；ubuntu 上
-#     CGO_ENABLED=0 交叉编译——keyring 在 Windows 走纯 Go 的 wincred。
-#     标记使数据/Cookie 全落 exe 旁 ./data/，免安装随文件夹走）
+#     CGO_ENABLED=0 交叉编译——keyring 在 Windows 走纯 Go 的 wincred，
+#     wails v2 windows 后端同为纯 Go（go-webview2 经 COM 直连系统
+#     WebView2 运行时，无需随包分发 WebView2Loader.dll）。构建参数
+#     -tags production 为 wails 硬要求：无该 tag 时 wails.Run 是 NO-OP
+#     （弹错误框/返回 error，窗口永不出现）；-H windowsgui 隐藏控制台
+#     黑窗。标记使数据/Cookie 全落 exe 旁 ./data/，免安装随文件夹走）
 #   - macOS：universal .app 打成 dmg——macos-14(arm64) + macos-15-intel(amd64)
-#     双原生构建（keychain 走 cgo 不交叉编译），dmg job 用 lipo 合并 universal；
-#     dmg 未签名未公证，首开需右键 → 打开（绕过 Gatekeeper）
+#     双原生构建（keychain 走 cgo 不交叉编译，wails darwin 后端亦依赖
+#     cgo），go build 同样带 -tags production；dmg job 用 lipo 合并
+#     universal；dmg 未签名未公证，首开需右键 → 打开（绕过 Gatekeeper）
 name: release
 
 on:
@@ -117,10 +122,14 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
+      # -tags production：wails 硬要求（无 tag 时 wails.Run 为 NO-OP，窗口
+      # 永不出现）；-H windowsgui：GUI 子系统，启动不弹控制台黑窗（与
+      # wails build 生产构建一致）。依赖全部经 go module proxy 拉取。
       - name: go build（windows/amd64）
         run: |
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
-            go build -trimpath -ldflags "-s -w" -o feiwu-windows-amd64.exe ./cmd/feiwu
+            go build -tags production -trimpath -ldflags "-s -w -H windowsgui" \
+            -o feiwu-windows-amd64.exe ./cmd/feiwu
 
       # portable zip = exe + feiwu.portable 标记：启动后数据（含 Cookie）全落
       # exe 旁 ./data/（Cookie 走加密文件而非凭据管理器，见 store/paths.go），
@@ -172,9 +181,20 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
+      # -tags production：wails 硬要求（darwin 下无 tag 时 wails.Run 直接
+      # 返回「Wails applications will not build without the correct build
+      # tags.」，应用以窗口失败退出）；cgo 原生构建不变（keychain + wails
+      # darwin 后端）。CGO_LDFLAGS/CGO_CFLAGS 为 wails build 注入环境的
+      # 等价物：UniformTypeIdentifiers 是 WailsContext.m 文件对话框
+      # filter 所需的 macOS 11+ 框架，缺它链接期报
+      # _OBJC_CLASS_$_UTType undefined（本地 arm64 实测复现）；
+      # -mmacosx-version-min 与 wails CLI 一致。依赖全走 go module proxy。
       - name: go build（原生架构；keychain cgo 不交叉）
+        env:
+          CGO_LDFLAGS: -framework UniformTypeIdentifiers -mmacosx-version-min=10.13
+          CGO_CFLAGS: -mmacosx-version-min=10.13
         run: |
-          go build -trimpath -ldflags "-s -w" -o "feiwu-${{ matrix.goarch }}" ./cmd/feiwu
+          go build -tags production -trimpath -ldflags "-s -w" -o "feiwu-${{ matrix.goarch }}" ./cmd/feiwu
 
       - name: 图标转 icns（sips + iconutil，macOS 自带）
         run: |

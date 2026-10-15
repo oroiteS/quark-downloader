@@ -14,14 +14,18 @@ pnpm test             # 全量测试（Vitest）
 pnpm build            # 先跑 typecheck（prebuild 链），产物直落 internal/webapi/web/dist
 ```
 
-后端为 Go 单二进制，前端产物经 `//go:embed`（internal/webapi/static.go）打进二进制：
+后端为 Go 单二进制，前端产物经 `//go:embed`（internal/webapi/static.go）打进二进制。桌面直接运行即打开 Wails 原生窗口；窗口模式构建需 `-tags production`（Wails 硬要求，缺 tag 时窗口拒绝启动并报错退出）：
 
 ```bash
-go build -o feiwu ./cmd/feiwu
+go build -tags production -o feiwu ./cmd/feiwu
 ./feiwu
 ```
 
-dev 模式前后端缺省端口已对齐（45678），`pnpm dev` + `go run ./cmd/feiwu` 双端都不再需要设 `FEIWU_PORT`。
+纯服务端模式（不开窗口）加 `FEIWU_NO_WINDOW=1`，配合 `pnpm dev` 在浏览器里开发前后端联调；dev 模式前后端缺省端口已对齐（45678），双端都不再需要设 `FEIWU_PORT`：
+
+```bash
+FEIWU_NO_WINDOW=1 go run ./cmd/feiwu
+```
 
 设置页的「选择目录…」按钮走 `POST /api/fs/pick-dir`：由后端调系统原生目录选择对话框（macOS 访达 / Windows FolderBrowserDialog / Linux zenity）返回绝对路径，未支持平台或对话框命令缺失返回 503 `fs_picker_unsupported`。
 
