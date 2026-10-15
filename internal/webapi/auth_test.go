@@ -725,6 +725,53 @@ func TestAccountQuickCheckInvalid(t *testing.T) {
 	}
 }
 
+// TestAccountAvatarHTTPUpgradedToHTTPS 真机 ATS 修复：夸克头像 URL 为
+// 明文 http://image.quark.cn/...，macOS WKWebView 的 ATS（App Transport
+// Security）默认拦截明文 HTTP 远程资源（loopback 127.0.0.1 有豁免故页面
+// 正常，image.quark.cn 被拦）→ img onerror → 前端回退首字占位。输出侧
+// 统一升级 https（https://image.quark.cn 已实证 200）；前缀不匹配的
+// URL（非该域/已是 https 等）原样透出，不做通用改写。
+func TestAccountAvatarHTTPUpgradedToHTTPS(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"明文 image.quark.cn 升级 https",
+			"http://image.quark.cn/o/uop/avatar/325e0.jpg",
+			"https://image.quark.cn/o/uop/avatar/325e0.jpg"},
+		{"前缀不匹配原样透出",
+			"http://example.com/a.png",
+			"http://example.com/a.png"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fa := &fakeAuth{
+				quickF: func() (bool, protocol.AccountInfo) {
+					return true, protocol.AccountInfo{Nickname: "妮可", AvatarURI: tt.in}
+				},
+				capF: func() (int64, int64, error) { return 100, 1, nil },
+			}
+			app := newAuthTestApp(t, fa, &fakeSecrets{})
+			app.jar.LoadFromString("__puus=tok")
+
+			w := doReq(t, app.Router(), http.MethodGet, "/api/account", nil)
+			if w.Code != http.StatusOK {
+				t.Fatalf("状态码 = %d（body=%s）", w.Code, w.Body)
+			}
+			var body struct {
+				Avatar string `json:"avatar"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("响应不是合法 JSON: %v（body=%s）", err, w.Body)
+			}
+			if body.Avatar != tt.want {
+				t.Fatalf("avatar = %q, 期望 %q（body=%s）", body.Avatar, tt.want, w.Body)
+			}
+		})
+	}
+}
+
 // TestAccountCapacityError Capacity 失败 → 502（账号信息查询链失败不静默）。
 func TestAccountCapacityError(t *testing.T) {
 	fa := &fakeAuth{capF: func() (int64, int64, error) { return 0, 0, errors.New("member 429") }}

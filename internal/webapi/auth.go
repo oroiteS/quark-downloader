@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -457,10 +458,29 @@ func (a *App) handleAccount(c *gin.Context) {
 			"查询网盘容量失败: "+err.Error())
 		return
 	}
+	// 头像输出侧升级 https（真机 ATS 修复）：夸克账号头像 URL 为明文
+	// http://image.quark.cn/...，macOS WKWebView 的 ATS 默认拦截明文 HTTP
+	// 远程资源（loopback 127.0.0.1 有豁免故页面正常，image.quark.cn 被
+	// 拦）→ img onerror → 前端回退首字占位。升级只发生在输出侧，缓存
+	// （进程内 + account.json）仍存上游原值。
 	c.JSON(http.StatusOK, gin.H{
 		"logged_in": true,
 		"nickname":  info.Nickname,
-		"avatar":    info.AvatarURI,
+		"avatar":    secureAvatarURL(info.AvatarURI),
 		"capacity":  gin.H{"total": total, "used": used},
 	})
+}
+
+// secureAvatarURL 把账号头像 URL 输出侧升级为 https：头像域固定为明文
+// http://image.quark.cn/...，而 macOS WKWebView 的 ATS（App Transport
+// Security）默认拦截明文 HTTP 远程资源（loopback 127.0.0.1 有豁免故页
+// 面本身正常，image.quark.cn 被拦）→ img onerror → 前端回退首字占位。
+// https://image.quark.cn 已实证可用（200），故仅对精确域前缀做替换；
+// 前缀不匹配（非该域/已是 https/相对路径等）原样返回，不做通用改写。
+func secureAvatarURL(u string) string {
+	const plain, tls = "http://image.quark.cn/", "https://image.quark.cn/"
+	if strings.HasPrefix(u, plain) {
+		return tls + u[len(plain):]
+	}
+	return u
 }
