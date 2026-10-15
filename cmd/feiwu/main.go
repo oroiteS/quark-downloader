@@ -253,7 +253,9 @@ func main() {
 	// 真开窗口。
 	//
 	// Task 7：signal ctx 直通 newWailsRunner（SIGINT/SIGTERM → runtime.Quit
-	// 关窗口 → run 收尾链）；HasActiveTasks 跨函数延迟解析——app 建于 run
+	// → wails OnBeforeClose 确认链：有活动任务弹关窗确认，取消则本次
+	// 退出被阻止，确认后才关窗口 → run 收尾链）；HasActiveTasks 跨函数
+	// 延迟解析——app 建于 run
 	// 内（onApp 回调交给 main 侧 atomic 容器），而 OnBeforeClose 在 wails
 	// 事件循环 goroutine 执行，atomic.Pointer 保证跨 goroutine 可见性。
 	// 时序上 runner 晚于 onApp 被调用（监听成功后才开窗），Load 必非 nil，

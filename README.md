@@ -57,7 +57,7 @@ FEIWU_NO_WINDOW=1 go run ./cmd/feiwu
 | 默认（桌面） | Wails 窗口，无浏览器 |
 | `FEIWU_NO_WINDOW=1` | 纯服务端 + 按 `FEIWU_OPEN_BROWSER` 决定是否 open |
 | 窗口初始化失败 | slog.Error + 非零退出（不 fallback 浏览器） |
-| Ctrl-C / SIGTERM | 直接退出，不弹关窗确认（信号即显式退出意图，信号路径不经 OnBeforeClose） |
+| Ctrl-C / SIGTERM | 触发退出；有未完成任务时同样弹关窗确认，取消则本次退出被阻止 |
 
 ## App 图标
 
